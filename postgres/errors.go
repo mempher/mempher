@@ -13,6 +13,12 @@ var (
 	// be created, which usually means a privileged role has to create it.
 	ErrMissingExtension = errors.New("required extension is missing")
 
+	// ErrUnsupportedExtension means an extension is installed but too old.
+	// pgvector must be 0.8 or newer, for iterative index scans: without them a
+	// scope-filtered vector search silently returns fewer rows than it should,
+	// and can return none at all.
+	ErrUnsupportedExtension = errors.New("unsupported extension version")
+
 	// ErrChecksumMismatch means an applied migration's source has changed.
 	// Migrations are forward-only: add a new one instead of editing an old one.
 	ErrChecksumMismatch = errors.New("applied migration has changed")

@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -30,8 +31,46 @@ type serverInfo struct {
 	// extensionSchema is where the vector extension lives, or "" when it is
 	// not installed yet.
 	extensionSchema string
+	// vectorVersion is pgvector's extversion, or "" when it is not installed.
+	vectorVersion string
 	// missing lists required extensions that are not installed.
 	missing []string
+}
+
+// MinVectorVersion is the lowest pgvector this adapter runs on. 0.8 introduced
+// iterative index scans, which a scope-filtered search cannot be correct without.
+const MinVectorVersion = "0.8"
+
+// checkVectorVersion rejects a pgvector too old for a filtered vector search.
+func (info serverInfo) checkVectorVersion() error {
+	major, minor, ok := parseVersion(info.vectorVersion)
+	if !ok {
+		return fmt.Errorf("mempher/postgres: cannot read the pgvector version (%q): %w",
+			info.vectorVersion, ErrUnsupportedExtension)
+	}
+	if major == 0 && minor < 8 {
+		return fmt.Errorf(
+			"mempher/postgres: pgvector is %s, need %s or newer for iterative index scans: %w",
+			info.vectorVersion, MinVectorVersion, ErrUnsupportedExtension)
+	}
+	return nil
+}
+
+// parseVersion reads the leading major and minor numbers of an extension version.
+func parseVersion(version string) (major, minor int, ok bool) {
+	parts := strings.SplitN(version, ".", 3)
+	if len(parts) < 2 {
+		return 0, 0, false
+	}
+	major, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return 0, 0, false
+	}
+	minor, err = strconv.Atoi(parts[1])
+	if err != nil {
+		return 0, 0, false
+	}
+	return major, minor, true
 }
 
 // rowQuerier is the read-only subset of pgx used for inspection, so the same
@@ -52,7 +91,7 @@ func inspect(ctx context.Context, db rowQuerier) (serverInfo, error) {
 	}
 
 	rows, err := db.Query(ctx, `
-		SELECT e.extname, n.nspname
+		SELECT e.extname, n.nspname, e.extversion
 		FROM pg_extension e
 		JOIN pg_namespace n ON n.oid = e.extnamespace
 		WHERE e.extname = ANY($1)
@@ -61,13 +100,15 @@ func inspect(ctx context.Context, db rowQuerier) (serverInfo, error) {
 		return serverInfo{}, fmt.Errorf("read installed extensions: %w", err)
 	}
 	installed := make(map[string]string, len(requiredExtensions))
+	versions := make(map[string]string, len(requiredExtensions))
 	for rows.Next() {
-		var name, schema string
-		if err := rows.Scan(&name, &schema); err != nil {
+		var name, schema, version string
+		if err := rows.Scan(&name, &schema, &version); err != nil {
 			rows.Close()
 			return serverInfo{}, fmt.Errorf("scan installed extension: %w", err)
 		}
 		installed[name] = schema
+		versions[name] = version
 	}
 	if err := rows.Err(); err != nil {
 		return serverInfo{}, fmt.Errorf("read installed extensions: %w", err)
@@ -79,6 +120,7 @@ func inspect(ctx context.Context, db rowQuerier) (serverInfo, error) {
 		}
 	}
 	info.extensionSchema = installed["vector"]
+	info.vectorVersion = versions["vector"]
 	return info, nil
 }
 

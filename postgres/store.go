@@ -63,6 +63,9 @@ func New(ctx context.Context, pool *pgxpool.Pool) (*Store, error) {
 			"mempher/postgres: new: %v not installed; run Migrate, or have a privileged role create them: %w",
 			info.missing, ErrMissingExtension)
 	}
+	if err := info.checkVectorVersion(); err != nil {
+		return nil, err
+	}
 	if err := validateIdentifier("extension schema", info.extensionSchema); err != nil {
 		return nil, fmt.Errorf("mempher/postgres: new: %w", err)
 	}
@@ -145,12 +148,5 @@ func isCode(err error, codes ...string) bool {
 	return false
 }
 
-// The methods this stage implements, asserted against the shape [mempher.Store]
-// requires. The full interface assertion lands with the search channels.
-var _ interface {
-	Append(context.Context, mempher.AppendCommand) (mempher.AppendResult, error)
-	Episode(context.Context, mempher.ScopeID, mempher.EpisodeID) (mempher.Episode, error)
-	Replay(context.Context, mempher.ScopeID, int64, int) ([]mempher.Episode, error)
-	PutEncoding(context.Context, mempher.Encoding) error
-	PendingEncodings(context.Context, mempher.PendingEncodings) ([]mempher.EpisodeID, error)
-} = (*Store)(nil)
+// Store implements the whole persistence port. The queue port follows.
+var _ mempher.Store = (*Store)(nil)
