@@ -6,7 +6,7 @@
 
 **Long-term memory for AI agents, in Go.**
 
-![Status](https://img.shields.io/badge/stage%201-in%20development-orange)
+![Status](https://img.shields.io/badge/status-in%20development-orange)
 [![CI](https://github.com/mempher/mempher/actions/workflows/ci.yml/badge.svg)](https://github.com/mempher/mempher/actions/workflows/ci.yml)
 [![Coverage](https://codecov.io/gh/mempher/mempher/graph/badge.svg)](https://codecov.io/gh/mempher/mempher)
 [![Go Reference](https://pkg.go.dev/badge/github.com/mempher/mempher.svg)](https://pkg.go.dev/github.com/mempher/mempher)
