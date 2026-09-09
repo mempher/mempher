@@ -2,7 +2,9 @@
 
 <img src="assets/logo.png" alt="mempher" width="200" />
 
-**Long-term memory for AI agents, in Go, on PostgreSQL 18 and pgvector.**
+# mempher
+
+**Long-term memory for AI agents, in Go.**
 
 ![Status](https://img.shields.io/badge/stage%201-in%20development-orange)
 [![CI](https://github.com/mempher/mempher/actions/workflows/ci.yml/badge.svg)](https://github.com/mempher/mempher/actions/workflows/ci.yml)
