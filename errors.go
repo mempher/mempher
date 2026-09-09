@@ -50,6 +50,3 @@ var (
 	// ErrClosed means the store was closed.
 	ErrClosed = errors.New("store is closed")
 )
-
-// errNotImplemented marks the bodies left empty in this stage.
-var errNotImplemented = errors.New("mempher: not implemented")

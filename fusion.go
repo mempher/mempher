@@ -72,7 +72,7 @@ func (o FusionOptions) weight(c Channel) float64 {
 type channelResult struct {
 	channel    Channel
 	candidates []Candidate
-	elapsed    time.Duration //nolint:unused // reported by Recall, which lands with the read loop
+	elapsed    time.Duration
 	err        error
 }
 

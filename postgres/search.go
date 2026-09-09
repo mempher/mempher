@@ -4,8 +4,11 @@
 package postgres
 
 import (
+	"bytes"
+	"cmp"
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -163,11 +166,17 @@ func (b *queryBuilder) appendEpisodeFilters(sql *strings.Builder, q mempher.Chan
 	}
 }
 
-// scanCandidates reads a channel's result set, ranking by position.
+// scanCandidates reads a channel's result set and ranks it.
 //
-// Rank comes from the order the database returned rather than from a window
-// function: one source of truth, and it cannot disagree with the slice fusion
-// actually consumes.
+// Rank comes from position rather than from a window function: one source of
+// truth, and it cannot disagree with the slice fusion actually consumes.
+//
+// The rows are re-sorted before ranking, because equal scores otherwise arrive
+// in whatever order the scan produced, and a vector index has no reason to be
+// consistent about that between runs. Recall promises that replaying a request
+// at the same AsOf reproduces the result, and ties are the ordinary case, not a
+// corner: four episodes that mention a term equally often are exactly tied.
+// Sorting here costs nothing at candidate-set sizes and cannot change the plan.
 func scanCandidates(
 	rows pgx.Rows,
 	channel mempher.Channel,
@@ -202,12 +211,23 @@ func scanCandidates(
 		out = append(out, mempher.Candidate{
 			Episode: ep,
 			Channel: channel,
-			Rank:    len(out) + 1,
 			Score:   score,
 		})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("read candidates: %w", err)
+	}
+
+	// Score first, then the newer episode: the same rule fusion uses to break
+	// its own ties, so the two cannot disagree.
+	slices.SortStableFunc(out, func(a, b mempher.Candidate) int {
+		if c := cmp.Compare(b.Score, a.Score); c != 0 {
+			return c
+		}
+		return bytes.Compare(b.Episode.ID[:], a.Episode.ID[:])
+	})
+	for i := range out {
+		out[i].Rank = i + 1
 	}
 	return out, nil
 }

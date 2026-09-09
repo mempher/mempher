@@ -500,3 +500,57 @@ func TestSearchLimit(t *testing.T) {
 		t.Errorf("lexical returned %d, want 4", len(gotLex))
 	}
 }
+
+// TestSearchOrderIsStableUnderTies pins the determinism Recall promises.
+//
+// Episodes that mention a term equally often tie exactly, and a vector index has
+// no reason to return tied rows in a consistent order between scans. Without a
+// tie-break the same request would give different answers on different runs.
+func TestSearchOrderIsStableUnderTies(t *testing.T) {
+	t.Parallel()
+	store, _ := migrated(t)
+	ctx := t.Context()
+	later := epoch.Add(time.Hour)
+
+	// Identical vectors and identical text: every ordering signal is a tie.
+	tied := unit(0)
+	for i := range 6 {
+		seed(t, store, "user:1", fmt.Sprintf("hazelnut %d", i), epoch, tied)
+	}
+
+	var first []string
+	for attempt := range 5 {
+		sem, err := store.SearchSemantic(ctx, semantic("user:1", unit(0), later))
+		if err != nil {
+			t.Fatalf("SearchSemantic: %v", err)
+		}
+		lex, err := store.SearchLexical(ctx, lexical("user:1", "hazelnut", later))
+		if err != nil {
+			t.Fatalf("SearchLexical: %v", err)
+		}
+		order := append(contents(sem), contents(lex)...)
+
+		if attempt == 0 {
+			first = order
+			if len(sem) != 6 || len(lex) != 6 {
+				t.Fatalf("got %d semantic and %d lexical candidates, want 6 each",
+					len(sem), len(lex))
+			}
+			continue
+		}
+		if fmt.Sprint(order) != fmt.Sprint(first) {
+			t.Fatalf("attempt %d ordered tied episodes as %v, want %v", attempt, order, first)
+		}
+	}
+
+	// Ranks must still be dense and start at one after the re-sort.
+	sem, err := store.SearchSemantic(ctx, semantic("user:1", unit(0), later))
+	if err != nil {
+		t.Fatalf("SearchSemantic: %v", err)
+	}
+	for i, c := range sem {
+		if c.Rank != i+1 {
+			t.Errorf("candidate %d has Rank %d, want %d", i, c.Rank, i+1)
+		}
+	}
+}

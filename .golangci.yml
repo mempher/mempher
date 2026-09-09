@@ -7,3 +7,11 @@ linters:
     - misspell
     - revive
     - wrapcheck
+  settings:
+    wrapcheck:
+      # Errors from this module already carry their own package prefix, so
+      # re-wrapping them only produces "mempher: mempher/postgres: ...".
+      # wrapcheck is here to make errors from *outside* traceable.
+      ignore-package-globs:
+        - github.com/mempher/mempher
+        - github.com/mempher/mempher/*

@@ -7,6 +7,10 @@ import (
 	"time"
 )
 
+// errNotImplemented is what the doubles below return: they exist to be wired
+// into a Config, never to be called.
+var errNotImplemented = errors.New("test double: not implemented")
+
 // storeOnly satisfies [Store] and nothing else, so a test can prove that New
 // insists on a Queue when the store cannot serve as one.
 type storeOnly struct{}
