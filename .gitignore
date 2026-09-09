@@ -1,0 +1,17 @@
+# Build output
+/bin/
+/dist/
+
+# Test and coverage artefacts
+*.test
+*.out
+/coverage.*
+
+# Editor and OS noise
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Personal overrides; .claude/settings.json is committed on purpose
+.claude/settings.local.json
