@@ -35,14 +35,16 @@ func (storeOnly) PendingEncodings(context.Context, PendingEncodings) ([]EpisodeI
 // ports off one pool.
 type storeAndQueue struct{ storeOnly }
 
-func (storeAndQueue) Enqueue(context.Context, NewJob) (Job, error) { return Job{}, errNotImplemented }
+func (storeAndQueue) Enqueue(context.Context, NewJob, time.Time) (Job, error) {
+	return Job{}, errNotImplemented
+}
 func (storeAndQueue) Lease(context.Context, LeaseRequest) ([]Job, error) {
 	return nil, errNotImplemented
 }
 func (storeAndQueue) Succeed(context.Context, JobID, WorkerID, time.Time) error {
 	return errNotImplemented
 }
-func (storeAndQueue) Fail(context.Context, JobID, WorkerID, error, time.Time) error {
+func (storeAndQueue) Fail(context.Context, JobID, WorkerID, error, time.Time, time.Time) error {
 	return errNotImplemented
 }
 func (storeAndQueue) Reclaim(context.Context, time.Time) (int, error) { return 0, errNotImplemented }

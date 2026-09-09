@@ -135,10 +135,10 @@ type LeaseRequest struct {
 // Queue is the deferred-work port. Leasing is at-least-once: a worker that dies
 // holding a lease has its job reclaimed, so every job body must be idempotent.
 type Queue interface {
-	// Enqueue adds one job. Duplicate work for the same kind, scope and
-	// episodes that is still pending or running collapses onto the existing
-	// job.
-	Enqueue(ctx context.Context, job NewJob) (Job, error)
+	// Enqueue adds one job at time now. Duplicate work for the same kind,
+	// scope and episodes that is still pending or running collapses onto the
+	// existing job, which is returned instead.
+	Enqueue(ctx context.Context, job NewJob, now time.Time) (Job, error)
 
 	// Lease atomically claims ready jobs for one worker, skipping jobs other
 	// workers hold.
@@ -148,13 +148,14 @@ type Queue interface {
 	// caller no longer holds the lease.
 	Succeed(ctx context.Context, id JobID, worker WorkerID, at time.Time) error
 
-	// Fail records a failed attempt. The job returns to pending with RunAfter
-	// set to retryAt, unless that attempt exhausted MaxAttempts, in which
-	// case it goes dead.
-	Fail(ctx context.Context, id JobID, worker WorkerID, cause error, retryAt time.Time) error
+	// Fail records at time at that an attempt failed. The job returns to
+	// pending with RunAfter set to retryAt, unless that attempt exhausted
+	// MaxAttempts, in which case it goes dead.
+	Fail(ctx context.Context, id JobID, worker WorkerID, cause error, at, retryAt time.Time) error
 
-	// Reclaim returns jobs whose leases expired before now to pending, and
-	// reports how many. It is how work survives a worker crash.
+	// Reclaim releases jobs whose leases expired before now, and reports how
+	// many. It is how work survives a worker crash. A job that had attempts
+	// left returns to pending; one that had none goes dead.
 	Reclaim(ctx context.Context, now time.Time) (int, error)
 
 	// Job returns one job by id, or [ErrNotFound].

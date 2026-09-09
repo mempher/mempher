@@ -148,5 +148,9 @@ func isCode(err error, codes ...string) bool {
 	return false
 }
 
-// Store implements the whole persistence port. The queue port follows.
-var _ mempher.Store = (*Store)(nil)
+// One type, both ports: they are separate concerns, but one pool serves both and
+// an append writes to both in a single statement.
+var (
+	_ mempher.Store = (*Store)(nil)
+	_ mempher.Queue = (*Store)(nil)
+)
