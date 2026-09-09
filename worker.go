@@ -145,13 +145,13 @@ func defaultWorkerID() WorkerID {
 // Run drains the queue until ctx is cancelled, waiting PollInterval whenever it
 // finds no work, and returns ctx.Err() on cancellation. A transient queue
 // failure does not stop the loop.
-func (w *Worker) Run(ctx context.Context) error {
+func (w *Worker) Run(ctx context.Context) error { //nolint:revive // ctx is used once the consolidation loop lands
 	return errNotImplemented
 }
 
 // DrainOnce claims and runs at most one batch, and reports how many succeeded.
 // It is what a test calls to make deferred work happen at a known point, and
 // what a one-shot command calls instead of a loop.
-func (w *Worker) DrainOnce(ctx context.Context) (int, error) {
+func (w *Worker) DrainOnce(ctx context.Context) (int, error) { //nolint:revive // ctx is used once the consolidation loop lands
 	return 0, errNotImplemented
 }

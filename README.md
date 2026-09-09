@@ -4,6 +4,7 @@
 
 **Long-term memory for AI agents, in Go, on PostgreSQL 18 and pgvector.**
 
+![Status](https://img.shields.io/badge/stage%201-in%20development-orange)
 [![CI](https://github.com/mempher/mempher/actions/workflows/ci.yml/badge.svg)](https://github.com/mempher/mempher/actions/workflows/ci.yml)
 [![Coverage](https://codecov.io/gh/mempher/mempher/graph/badge.svg)](https://codecov.io/gh/mempher/mempher)
 [![Go Reference](https://pkg.go.dev/badge/github.com/mempher/mempher.svg)](https://pkg.go.dev/github.com/mempher/mempher)
@@ -19,9 +20,6 @@
 One database and one binary. No graph store, no vector service, no Python
 sidecar, and no model client. `Embedder` is an interface you satisfy with
 whatever you already use.
-
-> **Status: Stage 1, in development.** The public API and schema are settled;
-> the loops behind them are being implemented. Not yet usable.
 
 ## The invariant
 

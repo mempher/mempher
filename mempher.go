@@ -113,7 +113,7 @@ func New(cfg Config) (*Memory, error) {
 //
 // Append never modifies an existing episode. Recording a correction means
 // appending another one.
-func (m *Memory) Append(ctx context.Context, req AppendRequest) (Episode, error) {
+func (m *Memory) Append(ctx context.Context, req AppendRequest) (Episode, error) { //nolint:revive // ctx is used once the write loop lands
 	return Episode{}, errNotImplemented
 }
 
@@ -127,6 +127,6 @@ func (m *Memory) Append(ctx context.Context, req AppendRequest) (Episode, error)
 // A failed channel is reported in [Recollection.Channels] and the rest still
 // answer. Recall fails with [ErrAllChannelsFailed] only when none succeeded, so
 // a thin answer is never mistaken for an empty memory.
-func (m *Memory) Recall(ctx context.Context, req RecallRequest) (Recollection, error) {
+func (m *Memory) Recall(ctx context.Context, req RecallRequest) (Recollection, error) { //nolint:revive // ctx is used once the read loop lands
 	return Recollection{}, errNotImplemented
 }
