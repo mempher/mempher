@@ -56,7 +56,7 @@ _, err = postgres.Migrate(ctx, pool, postgres.MigrateOptions{
 	VectorDimensions: myEmbedder.Dimensions(),
 })
 
-store := postgres.New(pool)
+store, err := postgres.New(ctx, pool) // satisfies both mempher.Store and mempher.Queue
 
 mem, err := mempher.New(mempher.Config{Store: store, Embedder: myEmbedder})
 
