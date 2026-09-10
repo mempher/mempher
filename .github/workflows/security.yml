@@ -30,6 +30,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       # govulncheck builds the packages to compute the call graph, so it needs
       # the toolchain go.mod asks for.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -45,6 +47,8 @@ jobs:
       actions: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -63,6 +67,8 @@ jobs:
       security-events: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       # Filesystem scan: dependency advisories from go.sum, plus secrets and
       # misconfiguration across the tree. There is no .trivyignore.yaml because
       # there is nothing yet to suppress; add one, with a reason per entry, if a
@@ -92,6 +98,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           fetch-depth: 0
       # Runs the gitleaks binary through its image rather than the marketplace
       # action, which requires a paid licence for GitHub organisations. The image
@@ -104,6 +111,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           fetch-depth: 0
       - name: TruffleHog secret scan
         uses: trufflesecurity/trufflehog@20652fbbdefffcdaa493a5bf57ab2ac6b1db715b # v3.97.1
@@ -112,14 +120,12 @@ jobs:
 
   plumber:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      security-events: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       # Plumber scans these workflows themselves for hardening gaps: unpinned
-      # actions, overbroad permissions, curl-pipe-shell, risky triggers. It
-      # uploads its own SARIF (upload-sarif defaults to true).
+      # actions, overbroad permissions, curl-pipe-shell, risky triggers.
       - name: Plumber pipeline scan
         uses: getplumber/plumber@4106f1120ba8db839bce0f213cf7b3ad3927cc5f # v0.4.50
         with:
@@ -127,6 +133,16 @@ jobs:
           # reddening the tree. Raise it as the pipelines are hardened.
           threshold: "75"
           soft-fail: "true"
+          # Off, and not for cosmetic reasons. Plumber reports repository-level
+          # findings -- ISSUE-501, "branch main must be protected", is the one
+          # this repository has -- as SARIF results with no location, and GitHub
+          # rejects the whole file for it: "locationFromSarifResult: expected at
+          # least one location". The scan itself passes; it was the upload that
+          # failed the job. The findings are in this job's log and in the
+          # plumber-report artifact, so nothing is lost but the Security tab
+          # entry. Turn this back on when the action gives its repository-level
+          # findings a location.
+          upload-sarif: "false"
 
   # OpenSSF Scorecard: not a code scanner but a review of the project's supply
   # chain practices, and what the badge in the README reads from.
