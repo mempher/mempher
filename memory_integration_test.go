@@ -464,10 +464,35 @@ func TestWorkerRunStopsOnCancellation(t *testing.T) {
 
 	f.append(t, "user:1", "some work to do")
 
-	select {
-	case err := <-done:
-		t.Fatalf("Run returned early: %v", err)
-	case <-time.After(200 * time.Millisecond):
+	// Wait for the loop to have done the work, rather than for a fixed
+	// interval and a hope. A lease, an embedding and a write take as long as
+	// they take, and on a loaded machine that is longer than any number
+	// written here would be; the deadline exists only so a loop that never
+	// makes progress fails instead of hanging.
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		// Run has no reason to return before it is cancelled, so catching it
+		// here is what proves the loop stayed up rather than dying quietly and
+		// leaving the work to look done by someone else.
+		select {
+		case err := <-done:
+			t.Fatalf("Run returned before it was cancelled: %v", err)
+		default:
+		}
+
+		pending, err := f.store.PendingEncodings(t.Context(), mempher.PendingEncodings{
+			Model: f.embedder.Model(),
+		})
+		if err != nil {
+			t.Fatalf("PendingEncodings: %v", err)
+		}
+		if len(pending) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d episodes were left unencoded", len(pending))
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 
 	cancel()
@@ -478,17 +503,6 @@ func TestWorkerRunStopsOnCancellation(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not stop when its context was cancelled")
-	}
-
-	// It did the work before stopping.
-	pending, err := f.store.PendingEncodings(t.Context(), mempher.PendingEncodings{
-		Model: f.embedder.Model(),
-	})
-	if err != nil {
-		t.Fatalf("PendingEncodings: %v", err)
-	}
-	if len(pending) != 0 {
-		t.Errorf("%d episodes were left unencoded", len(pending))
 	}
 }
 
