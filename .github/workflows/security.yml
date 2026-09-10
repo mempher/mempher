@@ -1,0 +1,172 @@
+# Security scanning: what CI proper does not have time for on every push.
+#
+# Everything here reports into the repository's Security tab rather than only
+# into a log, so a finding survives the run that produced it. Actions are pinned
+# by commit SHA with the tag in a comment, which is both this project's habit and
+# one of the practices Scorecard checks for.
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly, off the hour: a scheduled run at :00 queues behind everyone else's.
+    - cron: "25 12 * * 1"
+  # For Scorecard's Branch-Protection check, which only refreshes when the rules
+  # change. It fires rarely enough that letting the other jobs run with it costs
+  # less than six conditionals to stop them.
+  branch_protection_rule:
+
+permissions:
+  contents: read
+
+jobs:
+  # Reachability-based: reports only the vulnerabilities mempher's own code can
+  # actually call, so unlike the scanners below it gates the build. It lives here
+  # rather than in ci.yml so that every scan is in one place. The govulncheck
+  # version is pinned in the Makefile, which installs it and runs the scan.
+  govulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # govulncheck builds the packages to compute the call graph, so it needs
+      # the toolchain go.mod asks for.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: make vuln
+
+  codeql:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          languages: go
+      - uses: github/codeql-action/autobuild@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+      - uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          category: "/language:go"
+
+  trivy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Filesystem scan: dependency advisories from go.sum, plus secrets and
+      # misconfiguration across the tree. There is no .trivyignore.yaml because
+      # there is nothing yet to suppress; add one, with a reason per entry, if a
+      # finding turns out not to apply.
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scanners: vuln,secret,misconfig
+          severity: CRITICAL,HIGH
+          format: sarif
+          output: trivy.sarif
+          # Report into the Security tab without failing the build yet; tighten
+          # to "1" once the baseline is known clean. govulncheck is the scanner
+          # that gates, because it is the one that knows what the code reaches.
+          exit-code: "0"
+      - name: Upload results to the Security tab
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          sarif_file: trivy.sarif
+
+  # Two secret scanners, because they fail differently. gitleaks is regex over
+  # the whole history; TruffleHog verifies a candidate against the provider, so
+  # it catches what a pattern misses and stays quiet about what it can disprove.
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      # Runs the gitleaks binary through its image rather than the marketplace
+      # action, which requires a paid licence for GitHub organisations. The image
+      # and its flags live in the Makefile, so the same scan runs locally.
+      - name: gitleaks
+        run: make secrets
+
+  trufflehog:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: TruffleHog secret scan
+        uses: trufflesecurity/trufflehog@20652fbbdefffcdaa493a5bf57ab2ac6b1db715b # v3.97.1
+        with:
+          extra_args: --results=verified,unknown
+
+  plumber:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Plumber scans these workflows themselves for hardening gaps: unpinned
+      # actions, overbroad permissions, curl-pipe-shell, risky triggers. It
+      # uploads its own SARIF (upload-sarif defaults to true).
+      - name: Plumber pipeline scan
+        uses: getplumber/plumber@4106f1120ba8db839bce0f213cf7b3ad3927cc5f # v0.4.50
+        with:
+          # Below the action's default of 100 so the findings surface without
+          # reddening the tree. Raise it as the pipelines are hardened.
+          threshold: "75"
+          soft-fail: "true"
+
+  # OpenSSF Scorecard: not a code scanner but a review of the project's supply
+  # chain practices, and what the badge in the README reads from.
+  scorecard:
+    name: Scorecard supply-chain analysis
+    runs-on: ubuntu-latest
+    # Never on a pull request. Scorecard grades the repository rather than the
+    # diff, publishing only works from the default branch, and a fork's PR is
+    # not granted the id-token permission it would need.
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: read
+      # Upload the results to the code-scanning dashboard.
+      security-events: write
+      # Publish the results, which is what lets the badge resolve.
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run analysis
+        uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc # v2.4.4
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          # A read-only PAT is only needed to enable the Branch-Protection check
+          # on a public repository. Create one per the action's authentication
+          # docs, store it as SCORECARD_TOKEN, and uncomment this.
+          # repo_token: ${{ secrets.SCORECARD_TOKEN }}
+
+          # Publishes to the OpenSSF API so the README badge has something to
+          # read. Forced to false on private repositories; mempher is public.
+          publish_results: true
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: scorecard-sarif
+          path: results.sarif
+          retention-days: 5
+      - name: Upload results to the Security tab
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          sarif_file: results.sarif

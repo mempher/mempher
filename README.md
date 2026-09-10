@@ -8,6 +8,7 @@
 
 ![Status](https://img.shields.io/badge/status-in%20development-orange)
 [![CI](https://github.com/mempher/mempher/actions/workflows/ci.yml/badge.svg)](https://github.com/mempher/mempher/actions/workflows/ci.yml)
+[![Security](https://github.com/mempher/mempher/actions/workflows/security.yml/badge.svg)](https://github.com/mempher/mempher/actions/workflows/security.yml)
 [![Coverage](https://codecov.io/gh/mempher/mempher/graph/badge.svg)](https://codecov.io/gh/mempher/mempher)
 [![Go Reference](https://pkg.go.dev/badge/github.com/mempher/mempher.svg)](https://pkg.go.dev/github.com/mempher/mempher)
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/mempher/mempher/badge)](https://securityscorecards.dev/viewer/?uri=github.com/mempher/mempher)

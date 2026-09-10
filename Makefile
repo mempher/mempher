@@ -8,6 +8,10 @@ GO      ?= go
 PKGS    ?= ./...
 COVER   ?= coverage.out
 
+# Pinned rather than :latest, so a scan that passes today passes tomorrow for a
+# reason, and so the security workflow and a developer run the same scanner.
+GITLEAKS_IMAGE ?= ghcr.io/gitleaks/gitleaks:v8.30.1
+
 .DEFAULT_GOAL := help
 
 .PHONY: help
@@ -41,10 +45,17 @@ fmt: ## Format and group imports
 vuln: ## Check dependencies for known vulnerabilities
 	go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 $(PKGS)
 
+.PHONY: secrets
+secrets: ## Scan the tree for leaked secrets, as the security workflow does
+	docker run --rm -v "$(CURDIR):/repo" $(GITLEAKS_IMAGE) \
+		dir /repo --redact --no-banner --verbose
+
 .PHONY: tidy
 tidy: ## Tidy and verify the module
 	$(GO) mod tidy
 	$(GO) mod verify
 
 .PHONY: check
-check: fmt tidy lint test-all vuln ## Everything CI runs
+check: fmt tidy lint test-all vuln ## What ci.yml runs, plus govulncheck
+	@echo "For the deeper scans -- gitleaks, Trivy, CodeQL, Scorecard -- see"
+	@echo ".github/workflows/security.yml; 'make secrets' runs the first locally."
