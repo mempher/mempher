@@ -23,6 +23,10 @@ var (
 	ErrInvalidChannel = errors.New("invalid channel")
 	// ErrInvalidJobKind means an unknown [JobKind] was enqueued.
 	ErrInvalidJobKind = errors.New("invalid job kind")
+	// ErrInvalidJobState means a [JobState] was outside the defined set, or
+	// was one the operation refuses: a [PurgeRequest] naming pending or
+	// running work is the case this exists for.
+	ErrInvalidJobState = errors.New("invalid job state")
 	// ErrInvalidFact means an [Assertion] broke a length limit, left a
 	// required part empty, or carried a confidence outside [0,1].
 	ErrInvalidFact = errors.New("invalid fact")
@@ -61,6 +65,14 @@ var (
 	// this worker does not hold, usually because its lease expired and the job
 	// was reclaimed.
 	ErrJobNotLeased = errors.New("job not leased by this worker")
+	// ErrJobNotDead means a job was sent back to pending from a state other
+	// than dead. Work that is done is re-done by backfilling from L0, which
+	// derives what is missing, rather than by reviving the job that did it.
+	ErrJobNotDead = errors.New("job is not dead")
+	// ErrJobOutstanding means the work a revived job names is already queued
+	// or running. It is safe to ignore: the work happens either way, and the
+	// dead row stays dead so that the two cannot both run.
+	ErrJobOutstanding = errors.New("the same work is already queued")
 	// ErrClosed means the store was closed.
 	ErrClosed = errors.New("store is closed")
 )

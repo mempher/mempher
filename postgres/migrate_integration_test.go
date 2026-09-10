@@ -142,6 +142,23 @@ func TestMigrateBuildsAWorkingSchema(t *testing.T) {
 		if gist < 1 {
 			t.Errorf("found %d GiST indexes, want the facts temporal key", gist)
 		}
+
+		// The operational access paths. They are named rather than counted
+		// because each answers one question, and a queue that cannot be
+		// listed by state or by scope is a queue that fails silently.
+		for _, name := range []string{"jobs_state_idx", "jobs_scope_idx"} {
+			var exists bool
+			if err := pool.QueryRow(ctx, `
+				SELECT EXISTS (
+				    SELECT 1 FROM pg_indexes
+				    WHERE schemaname = 'mempher' AND indexname = $1
+				)`, name).Scan(&exists); err != nil {
+				t.Fatalf("look for %s: %v", name, err)
+			}
+			if !exists {
+				t.Errorf("index %s is missing", name)
+			}
+		}
 	})
 
 	t.Run("schema config records the deployment decisions", func(t *testing.T) {

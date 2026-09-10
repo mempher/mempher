@@ -644,3 +644,409 @@ func TestFailTruncatesEnormousErrors(t *testing.T) {
 		t.Error("the failure was not recorded at all")
 	}
 }
+
+// jobless appends an episode that implies no work, so a test can enqueue exactly
+// the job it means to and lease exactly that one.
+func jobless(t *testing.T, store *postgres.Store, scope mempher.ScopeID) mempher.EpisodeID {
+	t.Helper()
+	cmd := episode(scope, "no job implied", epoch)
+	cmd.Jobs = nil
+	got, err := store.Append(t.Context(), cmd)
+	if err != nil {
+		t.Fatalf("Append to %q: %v", scope, err)
+	}
+	return got.Episode.ID
+}
+
+// early is a run_after before any job an Append enqueues, so that a job a test
+// means to lease sorts to the front of the queue and Lease(1) claims that one
+// and no other. Leasing is ordered by run_after and then id.
+var early = epoch.Add(-time.Hour)
+
+// leaseTheOldest claims exactly one job and insists it is the expected one, so a
+// test manufacturing a job state cannot quietly operate on a different job.
+func leaseTheOldest(
+	t *testing.T,
+	store *postgres.Store,
+	worker mempher.WorkerID,
+	want mempher.JobID,
+) mempher.Job {
+	t.Helper()
+	leased := mustLease(t, store, lease(worker, epoch, 1))
+	if len(leased) != 1 || leased[0].ID != want {
+		t.Fatalf("leased %d jobs, want exactly job %s", len(leased), want)
+	}
+	return leased[0]
+}
+
+// enqueueLeasable adds one job that will sort to the front of the queue, so the
+// next Lease(1) claims it.
+func enqueueLeasable(
+	t *testing.T,
+	store *postgres.Store,
+	scope mempher.ScopeID,
+	maxAttempts int,
+) mempher.Job {
+	t.Helper()
+	id := jobless(t, store, scope)
+	job, err := store.Enqueue(t.Context(), mempher.NewJob{
+		Kind:        mempher.JobKindEncode,
+		Scope:       scope,
+		Episodes:    []mempher.EpisodeID{id},
+		RunAfter:    early,
+		MaxAttempts: maxAttempts,
+	}, epoch)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	return job
+}
+
+// killJob enqueues one job with a single attempt and spends it, which is the
+// only way a job reaches the dead state.
+func killJob(t *testing.T, store *postgres.Store, scope mempher.ScopeID) mempher.Job {
+	t.Helper()
+	ctx := t.Context()
+	job := enqueueLeasable(t, store, scope, 1)
+	leaseTheOldest(t, store, "doomed", job.ID)
+	if err := store.Fail(ctx, job.ID, "doomed", errors.New("the model was on fire"),
+		epoch, epoch.Add(time.Second)); err != nil {
+		t.Fatalf("Fail: %v", err)
+	}
+	dead, err := store.Job(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("Job: %v", err)
+	}
+	if dead.State != mempher.JobStateDead {
+		t.Fatalf("State = %q after exhausting its attempts, want dead", dead.State)
+	}
+	return dead
+}
+
+func TestJobsListsAndFilters(t *testing.T) {
+	t.Parallel()
+	store, _ := migrated(t)
+	ctx := t.Context()
+
+	// One encode job each, enqueued by Append itself.
+	first := seedScope(t, store, "user:1")
+	seedScope(t, store, "user:2")
+	// And one extract job, so the kind filter has something to exclude.
+	if _, err := store.Enqueue(ctx, mempher.NewJob{
+		Kind:     mempher.JobKindExtract,
+		Scope:    "user:1",
+		Episodes: []mempher.EpisodeID{first},
+	}, epoch); err != nil {
+		t.Fatalf("Enqueue extract: %v", err)
+	}
+
+	t.Run("everything", func(t *testing.T) {
+		got, err := store.Jobs(ctx, mempher.JobQuery{})
+		if err != nil {
+			t.Fatalf("Jobs: %v", err)
+		}
+		if len(got) != 3 {
+			t.Fatalf("Jobs returned %d, want 3", len(got))
+		}
+		// Ordered by id, which is uuidv7 and therefore creation order.
+		for i := 1; i < len(got); i++ {
+			if got[i-1].ID.String() >= got[i].ID.String() {
+				t.Errorf("job %d is not ordered after job %d", i, i-1)
+			}
+		}
+	})
+
+	t.Run("by scope", func(t *testing.T) {
+		got, err := store.Jobs(ctx, mempher.JobQuery{Scope: "user:2"})
+		if err != nil {
+			t.Fatalf("Jobs: %v", err)
+		}
+		if len(got) != 1 || got[0].Scope != "user:2" {
+			t.Errorf("Jobs for user:2 returned %d jobs, want 1", len(got))
+		}
+	})
+
+	t.Run("by kind", func(t *testing.T) {
+		got, err := store.Jobs(ctx, mempher.JobQuery{Kinds: []mempher.JobKind{mempher.JobKindExtract}})
+		if err != nil {
+			t.Fatalf("Jobs: %v", err)
+		}
+		if len(got) != 1 || got[0].Kind != mempher.JobKindExtract {
+			t.Errorf("Jobs of kind extract returned %d jobs, want 1", len(got))
+		}
+	})
+
+	t.Run("by state", func(t *testing.T) {
+		pending, err := store.Jobs(ctx, mempher.JobQuery{
+			States: []mempher.JobState{mempher.JobStatePending},
+		})
+		if err != nil {
+			t.Fatalf("Jobs: %v", err)
+		}
+		if len(pending) != 3 {
+			t.Errorf("pending jobs = %d, want 3", len(pending))
+		}
+		dead, err := store.Jobs(ctx, mempher.JobQuery{
+			States: []mempher.JobState{mempher.JobStateDead},
+		})
+		if err != nil {
+			t.Fatalf("Jobs: %v", err)
+		}
+		if len(dead) != 0 {
+			t.Errorf("dead jobs = %d, want none yet", len(dead))
+		}
+	})
+
+	t.Run("pages by After", func(t *testing.T) {
+		page, err := store.Jobs(ctx, mempher.JobQuery{Limit: 2})
+		if err != nil {
+			t.Fatalf("Jobs: %v", err)
+		}
+		if len(page) != 2 {
+			t.Fatalf("first page = %d jobs, want 2", len(page))
+		}
+		rest, err := store.Jobs(ctx, mempher.JobQuery{After: page[1].ID})
+		if err != nil {
+			t.Fatalf("Jobs: %v", err)
+		}
+		if len(rest) != 1 {
+			t.Errorf("second page = %d jobs, want 1", len(rest))
+		}
+	})
+}
+
+func TestJobsRejectsBadQueries(t *testing.T) {
+	t.Parallel()
+	store, _ := migrated(t)
+	ctx := t.Context()
+
+	if _, err := store.Jobs(ctx, mempher.JobQuery{
+		Kinds: []mempher.JobKind{"consolidate"},
+	}); !errors.Is(err, mempher.ErrInvalidJobKind) {
+		t.Errorf("unknown kind err = %v, want mempher.ErrInvalidJobKind", err)
+	}
+	if _, err := store.Jobs(ctx, mempher.JobQuery{
+		States: []mempher.JobState{"stuck"},
+	}); !errors.Is(err, mempher.ErrInvalidJobState) {
+		t.Errorf("unknown state err = %v, want mempher.ErrInvalidJobState", err)
+	}
+	if _, err := store.Jobs(ctx, mempher.JobQuery{Limit: -1}); !errors.Is(err, mempher.ErrInvalidConfig) {
+		t.Errorf("negative limit err = %v, want mempher.ErrInvalidConfig", err)
+	}
+}
+
+func TestJobStatsCountsByKindAndState(t *testing.T) {
+	t.Parallel()
+	store, _ := migrated(t)
+	ctx := t.Context()
+
+	seedScope(t, store, "user:1")
+	seedScope(t, store, "user:2")
+	dead := killJob(t, store, "user:3")
+
+	got, err := store.Stats(ctx, "")
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	buckets := map[string]mempher.JobCount{}
+	for _, count := range got {
+		buckets[string(count.Kind)+"/"+string(count.State)] = count
+	}
+	if pending := buckets["encode/pending"]; pending.Jobs != 2 {
+		t.Errorf("encode/pending = %d jobs, want 2", pending.Jobs)
+	}
+	if got := buckets["encode/dead"]; got.Jobs != 1 {
+		t.Errorf("encode/dead = %d jobs, want 1", got.Jobs)
+	}
+	// Depth without age cannot tell a busy queue from a stalled one.
+	if oldest := buckets["encode/pending"].Oldest; !oldest.Equal(epoch) {
+		t.Errorf("oldest pending = %s, want %s", oldest, epoch)
+	}
+	if _, reported := buckets["extract/pending"]; reported {
+		t.Error("an empty bucket was reported, which the port says it never is")
+	}
+
+	// A scope narrows it to that scope's work.
+	scoped, err := store.Stats(ctx, dead.Scope)
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if len(scoped) != 1 || scoped[0].State != mempher.JobStateDead || scoped[0].Jobs != 1 {
+		t.Errorf("Stats for %q = %+v, want one dead job", dead.Scope, scoped)
+	}
+}
+
+func TestRetryRevivesADeadJob(t *testing.T) {
+	t.Parallel()
+	store, _ := migrated(t)
+	ctx := t.Context()
+
+	dead := killJob(t, store, "user:1")
+	later := epoch.Add(time.Hour)
+
+	revived, err := store.Retry(ctx, dead.ID, later)
+	if err != nil {
+		t.Fatalf("Retry: %v", err)
+	}
+	switch {
+	case revived.State != mempher.JobStatePending:
+		t.Errorf("State = %q, want pending", revived.State)
+	case revived.Attempts != 0:
+		t.Errorf("Attempts = %d, want them reset to 0", revived.Attempts)
+	case !revived.RunAfter.Equal(later):
+		t.Errorf("RunAfter = %s, want %s", revived.RunAfter, later)
+	case revived.LeasedBy != "":
+		t.Errorf("LeasedBy = %q on a revived job", revived.LeasedBy)
+	case revived.LastError == "":
+		t.Error("LastError was cleared; the row no longer says what went wrong")
+	}
+
+	// And it is claimable again, which is the whole point.
+	leased := mustLease(t, store, lease("w1", later, 1))
+	if len(leased) != 1 || leased[0].ID != dead.ID {
+		t.Errorf("leased %d jobs, want the revived one back", len(leased))
+	}
+}
+
+func TestRetryRejectsWhatIsNotDead(t *testing.T) {
+	t.Parallel()
+	store, _ := migrated(t)
+	ctx := t.Context()
+
+	seedScope(t, store, "user:1")
+	pending, err := store.Jobs(ctx, mempher.JobQuery{})
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("Jobs = %d, %v; want the one job Append enqueued", len(pending), err)
+	}
+
+	if _, err := store.Retry(ctx, pending[0].ID, epoch); !errors.Is(err, mempher.ErrJobNotDead) {
+		t.Errorf("retrying a pending job err = %v, want mempher.ErrJobNotDead", err)
+	}
+	if _, err := store.Retry(ctx, mempher.JobID{9, 9, 9}, epoch); !errors.Is(err, mempher.ErrNotFound) {
+		t.Errorf("retrying an unknown job err = %v, want mempher.ErrNotFound", err)
+	}
+	if _, err := store.Retry(ctx, pending[0].ID, time.Time{}); !errors.Is(err, mempher.ErrInvalidConfig) {
+		t.Errorf("retrying with no clock err = %v, want mempher.ErrInvalidConfig", err)
+	}
+}
+
+// TestRetryRefusesWorkAlreadyQueued covers the partial unique index: a dead job
+// whose work has since been enqueued again cannot be revived onto it.
+func TestRetryRefusesWorkAlreadyQueued(t *testing.T) {
+	t.Parallel()
+	store, _ := migrated(t)
+	ctx := t.Context()
+
+	dead := killJob(t, store, "user:1")
+	if _, err := store.Enqueue(ctx, mempher.NewJob{
+		Kind:     dead.Kind,
+		Scope:    dead.Scope,
+		Episodes: dead.Episodes,
+	}, epoch); err != nil {
+		t.Fatalf("Enqueue the same work again: %v", err)
+	}
+
+	if _, err := store.Retry(ctx, dead.ID, epoch); !errors.Is(err, mempher.ErrJobOutstanding) {
+		t.Errorf("Retry err = %v, want mempher.ErrJobOutstanding", err)
+	}
+	// And the dead row is still dead, rather than half-revived.
+	still, err := store.Job(ctx, dead.ID)
+	if err != nil {
+		t.Fatalf("Job: %v", err)
+	}
+	if still.State != mempher.JobStateDead {
+		t.Errorf("State = %q after a refused retry, want dead", still.State)
+	}
+}
+
+func TestPurgeDeletesOnlyFinishedJobs(t *testing.T) {
+	t.Parallel()
+	store, _ := migrated(t)
+	ctx := t.Context()
+
+	// One job in each state. Each is leased straight after it is enqueued,
+	// while it is the only claimable job, and the pending one is created last
+	// so that nothing is ever ambiguous about which job a Lease returns.
+	done := enqueueLeasable(t, store, "user:done", 0)
+	leaseTheOldest(t, store, "w2", done.ID)
+	if err := store.Succeed(ctx, done.ID, "w2", epoch); err != nil {
+		t.Fatalf("Succeed: %v", err)
+	}
+
+	killJob(t, store, "user:dead")
+
+	running := enqueueLeasable(t, store, "user:running", 0)
+	leaseTheOldest(t, store, "w1", running.ID)
+
+	seedScope(t, store, "user:pending")
+
+	horizon := epoch.Add(time.Hour)
+	deleted, err := store.Purge(ctx, mempher.PurgeRequest{Before: horizon})
+	if err != nil {
+		t.Fatalf("Purge: %v", err)
+	}
+	if deleted != 2 {
+		t.Errorf("Purge deleted %d rows, want the done one and the dead one", deleted)
+	}
+
+	left, err := store.Jobs(ctx, mempher.JobQuery{})
+	if err != nil {
+		t.Fatalf("Jobs: %v", err)
+	}
+	for _, job := range left {
+		if job.State == mempher.JobStateDone || job.State == mempher.JobStateDead {
+			t.Errorf("job %s survived the purge in state %s", job.ID, job.State)
+		}
+	}
+	// Outstanding work is untouched, whatever its age.
+	if len(left) != 2 {
+		t.Errorf("%d jobs left, want the pending one and the running one", len(left))
+	}
+}
+
+func TestPurgeRespectsItsHorizonAndLimit(t *testing.T) {
+	t.Parallel()
+	store, _ := migrated(t)
+	ctx := t.Context()
+
+	for _, scope := range []mempher.ScopeID{"a", "b", "c"} {
+		killJob(t, store, scope)
+	}
+
+	// Nothing is older than the epoch itself, so nothing goes.
+	deleted, err := store.Purge(ctx, mempher.PurgeRequest{Before: epoch})
+	if err != nil {
+		t.Fatalf("Purge: %v", err)
+	}
+	if deleted != 0 {
+		t.Errorf("Purge deleted %d rows before the horizon, want 0", deleted)
+	}
+
+	// Bounded, so a deep history is a loop of short transactions.
+	deleted, err = store.Purge(ctx, mempher.PurgeRequest{Before: epoch.Add(time.Hour), Limit: 2})
+	if err != nil {
+		t.Fatalf("Purge: %v", err)
+	}
+	if deleted != 2 {
+		t.Errorf("Purge with Limit 2 deleted %d rows, want 2", deleted)
+	}
+}
+
+func TestPurgeRefusesOutstandingWork(t *testing.T) {
+	t.Parallel()
+	store, _ := migrated(t)
+	ctx := t.Context()
+
+	for _, state := range []mempher.JobState{mempher.JobStatePending, mempher.JobStateRunning} {
+		_, err := store.Purge(ctx, mempher.PurgeRequest{
+			Before: epoch.Add(time.Hour),
+			States: []mempher.JobState{state},
+		})
+		if !errors.Is(err, mempher.ErrInvalidJobState) {
+			t.Errorf("purging %s jobs err = %v, want mempher.ErrInvalidJobState", state, err)
+		}
+	}
+	if _, err := store.Purge(ctx, mempher.PurgeRequest{}); !errors.Is(err, mempher.ErrInvalidConfig) {
+		t.Errorf("purge with no horizon err = %v, want mempher.ErrInvalidConfig", err)
+	}
+}

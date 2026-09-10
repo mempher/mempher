@@ -7,32 +7,35 @@ import (
 	"time"
 )
 
-// errNotImplemented is what the doubles below return: they exist to be wired
-// into a Config, never to be called.
-var errNotImplemented = errors.New("test double: not implemented")
+// errTestDouble is what the doubles below return: they exist to be wired into a
+// Config, never to be called.
+var errTestDouble = errors.New("test double: not implemented")
 
 // storeOnly satisfies [Store] and nothing else, so a test can prove that New
 // insists on a Queue when the store cannot serve as one.
 type storeOnly struct{}
 
 func (storeOnly) Append(context.Context, AppendCommand) (AppendResult, error) {
-	return AppendResult{}, errNotImplemented
+	return AppendResult{}, errTestDouble
 }
 func (storeOnly) Episode(context.Context, ScopeID, EpisodeID) (Episode, error) {
-	return Episode{}, errNotImplemented
+	return Episode{}, errTestDouble
 }
 func (storeOnly) Replay(context.Context, ScopeID, int64, int) ([]Episode, error) {
-	return nil, errNotImplemented
+	return nil, errTestDouble
 }
 func (storeOnly) SearchSemantic(context.Context, SemanticQuery) ([]Candidate, error) {
-	return nil, errNotImplemented
+	return nil, errTestDouble
 }
 func (storeOnly) SearchLexical(context.Context, LexicalQuery) ([]Candidate, error) {
-	return nil, errNotImplemented
+	return nil, errTestDouble
 }
-func (storeOnly) PutEncoding(context.Context, Encoding) error { return errNotImplemented }
+func (storeOnly) PutEncoding(context.Context, Encoding) error { return errTestDouble }
 func (storeOnly) PendingEncodings(context.Context, PendingEncodings) ([]EpisodeID, error) {
-	return nil, errNotImplemented
+	return nil, errTestDouble
+}
+func (storeOnly) Scopes(context.Context, ScopeQuery) ([]Scope, error) {
+	return nil, errTestDouble
 }
 
 // storeAndQueue is shaped like the real postgres adapter: one type serving both
@@ -40,19 +43,31 @@ func (storeOnly) PendingEncodings(context.Context, PendingEncodings) ([]EpisodeI
 type storeAndQueue struct{ storeOnly }
 
 func (storeAndQueue) Enqueue(context.Context, NewJob, time.Time) (Job, error) {
-	return Job{}, errNotImplemented
+	return Job{}, errTestDouble
 }
 func (storeAndQueue) Lease(context.Context, LeaseRequest) ([]Job, error) {
-	return nil, errNotImplemented
+	return nil, errTestDouble
 }
 func (storeAndQueue) Succeed(context.Context, JobID, WorkerID, time.Time) error {
-	return errNotImplemented
+	return errTestDouble
 }
 func (storeAndQueue) Fail(context.Context, JobID, WorkerID, error, time.Time, time.Time) error {
-	return errNotImplemented
+	return errTestDouble
 }
-func (storeAndQueue) Reclaim(context.Context, time.Time) (int, error) { return 0, errNotImplemented }
-func (storeAndQueue) Job(context.Context, JobID) (Job, error)         { return Job{}, errNotImplemented }
+func (storeAndQueue) Reclaim(context.Context, time.Time) (int, error) { return 0, errTestDouble }
+func (storeAndQueue) Job(context.Context, JobID) (Job, error)         { return Job{}, errTestDouble }
+func (storeAndQueue) Jobs(context.Context, JobQuery) ([]Job, error) {
+	return nil, errTestDouble
+}
+func (storeAndQueue) Stats(context.Context, ScopeID) ([]JobCount, error) {
+	return nil, errTestDouble
+}
+func (storeAndQueue) Retry(context.Context, JobID, time.Time) (Job, error) {
+	return Job{}, errTestDouble
+}
+func (storeAndQueue) Purge(context.Context, PurgeRequest) (int, error) {
+	return 0, errTestDouble
+}
 
 var (
 	_ Store = storeOnly{}
@@ -67,10 +82,10 @@ type stubEmbedder struct {
 }
 
 func (e stubEmbedder) EmbedDocuments(context.Context, []string) ([]Vector, error) {
-	return nil, errNotImplemented
+	return nil, errTestDouble
 }
 func (e stubEmbedder) EmbedQuery(context.Context, string) (Vector, error) {
-	return nil, errNotImplemented
+	return nil, errTestDouble
 }
 func (e stubEmbedder) Dimensions() int { return e.dims }
 func (e stubEmbedder) Model() ModelID  { return e.model }

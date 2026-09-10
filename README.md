@@ -140,6 +140,20 @@ w, err := mempher.NewWorker(mempher.WorkerConfig{
 go w.Run(ctx) // or w.DrainOnce(ctx) for a one-shot, and in tests
 ```
 
+If a job dies, an extractor is configured after the fact, or a model changes,
+ask L0 what work it implies and enqueue whatever the queue is missing:
+
+```go
+// Everything with no encoding for this Embedder, and nothing an Extractor has
+// already read. Safe to run live, safe to run twice, and resumable.
+res, err := w.Backfill(ctx, mempher.BackfillRequest{})
+```
+
+That is what makes "drop the projection and replay L0" a real repair rather than
+a slogan. The queue itself is readable and prunable for the same reason —
+`Jobs` lists it by scope, kind and state, `Stats` gives each bucket's depth and
+age, `Retry` revives a dead job, `Purge` takes the history.
+
 An episode is durable and **lexically** searchable the moment `Append` returns,
 because the `tsvector` is a generated column. It becomes **semantically**
 searchable once a worker encodes it, and has yielded whatever **facts** it holds

@@ -44,4 +44,12 @@ type Store interface {
 	// PendingEncodings returns ids of episodes with no encoding for a model,
 	// in Seq order.
 	PendingEncodings(ctx context.Context, q PendingEncodings) ([]EpisodeID, error)
+
+	// Scopes lists the partitions of L0 in id order, so that work spanning
+	// all of them can be walked one scope at a time.
+	//
+	// It is the catalogue every other method assumes: Seq is only ordered
+	// within a scope, so paging through the whole log means paging through
+	// each scope in turn, and nothing else can say what the scopes are.
+	Scopes(ctx context.Context, q ScopeQuery) ([]Scope, error)
 }

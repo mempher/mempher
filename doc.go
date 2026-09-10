@@ -37,5 +37,21 @@
 // against the query and fused; facts are what is true about the scope, returned
 // whole and budgeted first.
 //
+// # Operating it
+//
+// A projection is disposable, so the library has to be able to rebuild one.
+// [Worker.Backfill] asks L0 what work it implies -- episodes with no encoding
+// for the configured [Embedder], episodes no [Extractor] has read -- and
+// enqueues whatever the queue is missing. It answers from the projection tables
+// rather than from the queue's own history, so it recovers a job that died, a
+// scope that predates the extractor, and a model or prompt that has since
+// changed, without knowing which of the three happened.
+//
+// The queue can also be read and pruned: [Queue.Jobs] lists work by scope, kind
+// and state, [Queue.Stats] reports each bucket's depth and age, [Queue.Retry]
+// revives a dead job once its cause has been dealt with, and [Queue.Purge]
+// deletes finished rows. [Store.Scopes] lists the partitions of L0, which is how
+// work spanning all of them is walked.
+//
 // Forgetting and procedural memory are not implemented.
 package mempher
