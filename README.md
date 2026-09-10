@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/logo.png" alt="mempher" width="200" />
+<img src="assets/logo.png" alt="mempher" width="150" />
 
 # mempher
 
@@ -41,6 +41,29 @@ Two rules follow, and the schema enforces both. A trigger on `episodes` rejects
 
 That is what makes a bad extractor recoverable and forgetting safe.
 
+```mermaid
+flowchart TB
+    APP["<b>Append</b>"]
+    EP[("<b>episodes</b> · L0<br/>immutable · the only source of truth")]
+    ENC[("<b>encodings</b>")]
+    FCT[("<b>facts</b><br/>+ the window each holds over")]
+    RC["<b>Recall</b>"]
+
+    APP -- "no model call" --> EP
+    EP -- "a Worker, offline:<br/>embed" --> ENC
+    EP -- "a Worker, offline:<br/>extract" --> FCT
+    ENC -- "semantic" --> RC
+    FCT -- "valid now" --> RC
+    EP -- "lexical" --> RC
+
+    classDef truth fill:#0b7285,stroke:#083f4d,color:#ffffff
+    classDef proj fill:#e3fafc,stroke:#0b7285,color:#083f4d
+    classDef act fill:#fff4e6,stroke:#d9480f,color:#7f2704
+    class EP truth
+    class ENC,FCT proj
+    class APP,RC act
+```
+
 ## Three loops
 
 | Loop | When | Model calls | Does |
@@ -59,6 +82,10 @@ live?" and the answer to "where did they live last year?" are both still there.
 
 Nothing is ever deleted to make that work. A claim the world has moved past has
 its window closed, and stays answerable.
+
+<div align="center">
+<img src="assets/how-it-works.gif" alt="A fact is bounded in time rather than overwritten, so both now and last year still have an answer" width="700" />
+</div>
 
 ## Usage
 
