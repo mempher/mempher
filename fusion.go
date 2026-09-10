@@ -72,8 +72,12 @@ func (o FusionOptions) weight(c Channel) float64 {
 type channelResult struct {
 	channel    Channel
 	candidates []Candidate
-	elapsed    time.Duration
-	err        error
+	// facts is what [ChannelFact] contributed. It is carried alongside
+	// candidates rather than converted into them because fusion ranks
+	// episodes, and a fact is not one.
+	facts   []Fact
+	elapsed time.Duration
+	err     error
 }
 
 // fuse combines per-channel rankings into one list, best first.

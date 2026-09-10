@@ -130,7 +130,7 @@ func TestEnqueueRejectsBadJobs(t *testing.T) {
 		},
 		{
 			name:    "unknown kind",
-			job:     mempher.NewJob{Kind: "extract", Scope: "user:1", Episodes: []mempher.EpisodeID{id}},
+			job:     mempher.NewJob{Kind: "nonesuch", Scope: "user:1", Episodes: []mempher.EpisodeID{id}},
 			now:     epoch,
 			wantErr: mempher.ErrInvalidJobKind,
 		},

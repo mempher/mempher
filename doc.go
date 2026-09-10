@@ -22,9 +22,20 @@
 // fusion, cuts the result to a token budget, and returns it with the provenance
 // of every hit. Its only model call embeds the query.
 //
-// # Scope of this stage
+// # The layers
 //
-// L0 only: [Memory.Append], [Memory.Recall] over raw episode content, and a job
-// queue whose single kind is [JobKindEncode]. Fact extraction, forgetting and
-// procedural memory are not implemented.
+// L0 is the episode log: [Memory.Append], [Memory.Recall] over raw content, and
+// encode jobs that project it into vectors.
+//
+// L1 is the facts extracted from it, each with the event-time window over which
+// it holds and the episodes it was read from. It is opt-in: configure an
+// [Extractor] and appends enqueue [JobKindExtract] alongside the encode job, a
+// [Worker] drains it, and [Recollection.Facts] carries the result. Leave it nil
+// and none of that happens.
+//
+// The two layers are not peers, and recall keeps them apart. Episodes are ranked
+// against the query and fused; facts are what is true about the scope, returned
+// whole and budgeted first.
+//
+// Forgetting and procedural memory are not implemented.
 package mempher

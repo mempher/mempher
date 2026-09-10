@@ -23,6 +23,15 @@ var (
 	ErrInvalidChannel = errors.New("invalid channel")
 	// ErrInvalidJobKind means an unknown [JobKind] was enqueued.
 	ErrInvalidJobKind = errors.New("invalid job kind")
+	// ErrInvalidFact means an [Assertion] broke a length limit, left a
+	// required part empty, or carried a confidence outside [0,1].
+	ErrInvalidFact = errors.New("invalid fact")
+	// ErrInvalidValidity means a [Validity] had no start, or ended at or
+	// before it began.
+	ErrInvalidValidity = errors.New("invalid validity window")
+	// ErrInvalidExtraction means an [ExtractCommand] named no episodes, or
+	// asserted or retracted more than one extraction may.
+	ErrInvalidExtraction = errors.New("invalid extraction")
 	// ErrInvalidConfig means a [Config] or [WorkerConfig] was missing a
 	// required port or held a nonsensical value.
 	ErrInvalidConfig = errors.New("invalid config")
@@ -38,6 +47,11 @@ var (
 	// ErrEmbedderMismatch means the configured [Embedder] disagrees with what
 	// the database was migrated for.
 	ErrEmbedderMismatch = errors.New("embedder does not match schema")
+	// ErrFactConflict means an assertion overlapped an existing fact for the
+	// same scope, extractor, subject, predicate and object over a window it
+	// contradicts. It is reported rather than resolved: silently widening one
+	// of the two windows would lose the disagreement that caused it.
+	ErrFactConflict = errors.New("fact validity windows conflict")
 	// ErrAllChannelsFailed means every retrieval channel failed, so the result
 	// would be silently empty rather than merely degraded. Lesser failures are
 	// reported in [Recollection.Channels].

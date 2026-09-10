@@ -24,12 +24,20 @@ type JobKind string
 const (
 	// JobKindEncode embeds an episode's content and writes the encoding.
 	JobKindEncode JobKind = "encode"
+	// JobKindExtract reads an episode and writes the facts it yields.
+	//
+	// It is separate from JobKindEncode rather than one "consolidate" kind
+	// because the two projections fail, retry and get backfilled
+	// independently: an embedding model change reruns every encode and no
+	// extraction, and a prompt fix reruns the reverse. One kind would couple
+	// a cheap backfill to an expensive one.
+	JobKindExtract JobKind = "extract"
 )
 
 // Valid reports whether k is one of the defined kinds.
 func (k JobKind) Valid() bool {
 	switch k {
-	case JobKindEncode:
+	case JobKindEncode, JobKindExtract:
 		return true
 	default:
 		return false

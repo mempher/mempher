@@ -41,11 +41,19 @@ func TestMigrateFreshDatabase(t *testing.T) {
 	pool := pgtest.Pool(t)
 	result := mustMigrate(t, pool)
 
-	if len(result.Applied) != 1 || result.Applied[0] != 1 {
-		t.Errorf("Applied = %v, want [1]", result.Applied)
+	// Asserted as a property rather than against a literal version, so that
+	// adding a migration does not mean editing this test: a fresh database
+	// gets the whole embedded set, contiguously, from 1.
+	if len(result.Applied) == 0 {
+		t.Fatalf("Applied = %v, want every embedded migration", result.Applied)
 	}
-	if result.Version != 1 {
-		t.Errorf("Version = %d, want 1", result.Version)
+	for i, version := range result.Applied {
+		if want := i + 1; version != want {
+			t.Errorf("Applied[%d] = %d, want %d (got %v)", i, version, want, result.Applied)
+		}
+	}
+	if want := result.Applied[len(result.Applied)-1]; result.Version != want {
+		t.Errorf("Version = %d, want %d, the last migration applied", result.Version, want)
 	}
 	if result.ExtensionSchema != postgres.DefaultExtensionSchema {
 		t.Errorf("ExtensionSchema = %q, want %q",
@@ -58,7 +66,7 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	t.Parallel()
 
 	pool := pgtest.Pool(t)
-	mustMigrate(t, pool)
+	first := mustMigrate(t, pool)
 
 	second, err := postgres.Migrate(t.Context(), pool, testOptions())
 	if err != nil {
@@ -67,17 +75,19 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	if len(second.Applied) != 0 {
 		t.Errorf("second run applied %v, want nothing", second.Applied)
 	}
-	if second.Version != 1 {
-		t.Errorf("Version = %d, want 1", second.Version)
+	if second.Version != first.Version {
+		t.Errorf("Version = %d after the second run, want %d", second.Version, first.Version)
 	}
 
+	// One ledger row per migration, however many there are: a second run that
+	// re-recorded history would show up here as a doubled count.
 	var ledger int
 	if err := pool.QueryRow(t.Context(),
 		"SELECT count(*) FROM mempher.schema_migrations").Scan(&ledger); err != nil {
 		t.Fatalf("count ledger: %v", err)
 	}
-	if ledger != 1 {
-		t.Errorf("ledger has %d rows after two runs, want 1", ledger)
+	if ledger != first.Version {
+		t.Errorf("ledger has %d rows after two runs, want %d", ledger, first.Version)
 	}
 }
 
@@ -92,7 +102,10 @@ func TestMigrateBuildsAWorkingSchema(t *testing.T) {
 	ctx := t.Context()
 
 	t.Run("tables", func(t *testing.T) {
-		want := []string{"episodes", "episode_encodings", "jobs", "schema_config", "schema_migrations", "scopes"}
+		want := []string{
+			"episodes", "episode_encodings", "facts", "fact_extractions",
+			"jobs", "schema_config", "schema_migrations", "scopes",
+		}
 		for _, table := range want {
 			var exists bool
 			if err := pool.QueryRow(ctx, `
@@ -108,13 +121,14 @@ func TestMigrateBuildsAWorkingSchema(t *testing.T) {
 	})
 
 	t.Run("indexes", func(t *testing.T) {
-		var hnsw, gin int
+		var hnsw, gin, gist int
 		if err := pool.QueryRow(ctx, `
 			SELECT
 				count(*) FILTER (WHERE indexdef LIKE '%USING hnsw%'),
-				count(*) FILTER (WHERE indexdef LIKE '%USING gin%')
+				count(*) FILTER (WHERE indexdef LIKE '%USING gin%'),
+				count(*) FILTER (WHERE indexdef LIKE '%USING gist%')
 			FROM pg_indexes WHERE schemaname = 'mempher'
-		`).Scan(&hnsw, &gin); err != nil {
+		`).Scan(&hnsw, &gin, &gist); err != nil {
 			t.Fatalf("read indexes: %v", err)
 		}
 		if hnsw != 1 {
@@ -122,6 +136,11 @@ func TestMigrateBuildsAWorkingSchema(t *testing.T) {
 		}
 		if gin < 2 {
 			t.Errorf("found %d GIN indexes, want at least 2 (tsvector and binding)", gin)
+		}
+		// The facts temporal primary key. Without btree_gist it could not be
+		// built, so its absence means the extension went missing.
+		if gist < 1 {
+			t.Errorf("found %d GiST indexes, want the facts temporal key", gist)
 		}
 	})
 
@@ -173,6 +192,96 @@ func TestMigrateBuildsAWorkingSchema(t *testing.T) {
 			t.Errorf("%d episodes remain, want the original 1", remaining)
 		}
 	})
+
+	// The invariant L1 adds: one scope cannot believe the same claim over two
+	// overlapping windows. It is the temporal primary key that enforces it,
+	// which is the whole reason this library requires PostgreSQL 18.
+	t.Run("L1 rejects overlapping validity windows", func(t *testing.T) {
+		if _, err := pool.Exec(ctx,
+			"INSERT INTO mempher.scopes (id, last_seq, created_at) VALUES ('l1', 0, now())"); err != nil {
+			t.Fatalf("seed scope: %v", err)
+		}
+
+		insert := func(object string, window string) error {
+			_, err := pool.Exec(ctx, `
+				INSERT INTO mempher.facts
+					(scope_id, extractor, subject, predicate, object,
+					 statement, valid, episode_ids, asserted_at, updated_at)
+				VALUES ('l1', 'test-extractor', 'user', 'lives_in', $1,
+					'the user lives somewhere', `+window+`,
+					ARRAY[uuidv7()], now(), now())
+			`, object)
+			if err != nil {
+				return fmt.Errorf("insert %s over %s: %w", object, window, err)
+			}
+			return nil
+		}
+
+		const (
+			until2024 = "tstzrange('2019-01-01Z', '2024-01-01Z', '[)')"
+			from2023  = "tstzrange('2023-01-01Z', NULL, '[)')"
+			from2024  = "tstzrange('2024-01-01Z', NULL, '[)')"
+		)
+
+		if err := insert("Paris", until2024); err != nil {
+			t.Fatalf("first fact: %v", err)
+		}
+		// Same claim, overlapping window: the contradiction the key exists for.
+		if err := insert("Paris", from2023); err == nil {
+			t.Error("an overlapping window for the same claim was permitted")
+		}
+		// Adjacent, not overlapping. Half-open bounds are what make a change of
+		// state need no gap between the old window and the new one.
+		if err := insert("Paris", from2024); err != nil {
+			t.Errorf("an adjacent window was rejected: %v", err)
+		}
+		// A different object of the same predicate is a different fact, because
+		// two of them can be true at once. Only the extractor knows whether one
+		// replaces the other, so it says so with a retraction.
+		if err := insert("Berlin", from2023); err != nil {
+			t.Errorf("a second object for one predicate was rejected: %v", err)
+		}
+
+		// The window shape the key depends on. An inclusive upper bound would
+		// let two "adjacent" windows share an instant and slip past the
+		// overlap check.
+		for _, bad := range []struct {
+			why    string
+			window string
+		}{
+			{"an inclusive upper bound", "tstzrange('2030-01-01Z', '2031-01-01Z', '[]')"},
+			{"an unbounded start", "tstzrange(NULL, '2031-01-01Z', '[)')"},
+			{"an empty window", "tstzrange('2030-01-01Z', '2030-01-01Z', '[)')"},
+		} {
+			if err := insert("Lisbon", bad.window); err == nil {
+				t.Errorf("%s was permitted", bad.why)
+			}
+		}
+	})
+
+	// Adding a job kind is a forward migration, so the CHECK has to have moved.
+	t.Run("the queue accepts the extract kind", func(t *testing.T) {
+		if _, err := pool.Exec(ctx,
+			"INSERT INTO mempher.scopes (id, last_seq, created_at) VALUES ('q2', 0, now())"); err != nil {
+			t.Fatalf("seed scope: %v", err)
+		}
+		for _, kind := range []string{"encode", "extract"} {
+			if _, err := pool.Exec(ctx, `
+				INSERT INTO mempher.jobs
+					(kind, scope_id, episode_ids, run_after, created_at, updated_at)
+				VALUES ($1, 'q2', ARRAY[uuidv7()], now(), now(), now())
+			`, kind); err != nil {
+				t.Errorf("enqueue %q: %v", kind, err)
+			}
+		}
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO mempher.jobs
+				(kind, scope_id, episode_ids, run_after, created_at, updated_at)
+			VALUES ('nonesuch', 'q2', ARRAY[uuidv7()], now(), now(), now())
+		`); err == nil {
+			t.Error("an undefined job kind was permitted; the set must stay closed")
+		}
+	})
 }
 
 // TestMigrateConcurrent is the reason the advisory lock exists: every instance of
@@ -206,7 +315,7 @@ func TestMigrateConcurrent(t *testing.T) {
 	close(start)
 	wg.Wait()
 
-	appliedBy := 0
+	appliedBy, version := 0, 0
 	for i, err := range errs {
 		if err != nil {
 			t.Errorf("racer %d failed: %v", i, err)
@@ -215,8 +324,15 @@ func TestMigrateConcurrent(t *testing.T) {
 		if len(results[i].Applied) > 0 {
 			appliedBy++
 		}
-		if results[i].Version != 1 {
-			t.Errorf("racer %d saw version %d, want 1", i, results[i].Version)
+		// Every racer must come away with the same version, whichever one of
+		// them did the work: a racer that returned before the migration it
+		// waited on had committed is the bug this catches.
+		switch {
+		case version == 0:
+			version = results[i].Version
+		case results[i].Version != version:
+			t.Errorf("racer %d saw version %d, but another saw %d",
+				i, results[i].Version, version)
 		}
 	}
 	if appliedBy != 1 {
@@ -228,8 +344,8 @@ func TestMigrateConcurrent(t *testing.T) {
 		"SELECT count(*) FROM mempher.schema_migrations").Scan(&ledger); err != nil {
 		t.Fatalf("count ledger: %v", err)
 	}
-	if ledger != 1 {
-		t.Errorf("ledger has %d rows, want 1", ledger)
+	if ledger != version {
+		t.Errorf("ledger has %d rows, want %d", ledger, version)
 	}
 }
 

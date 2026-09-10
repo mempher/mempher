@@ -70,7 +70,7 @@ func TestNewStore(t *testing.T) {
 		t.Parallel()
 		pool := pgtest.Pool(t)
 		// The extensions exist but nothing else does.
-		for _, ext := range []string{"vector", "btree_gin"} {
+		for _, ext := range []string{"vector", "btree_gin", "btree_gist"} {
 			if _, err := pool.Exec(t.Context(), "CREATE EXTENSION "+ext); err != nil {
 				t.Fatalf("create %s: %v", ext, err)
 			}
@@ -313,7 +313,7 @@ func TestAppendRejectsBadCommands(t *testing.T) {
 		{
 			name: "unknown job kind",
 			mutate: func(c *mempher.AppendCommand) {
-				c.Jobs = []mempher.NewJob{{Kind: mempher.JobKind("extract")}}
+				c.Jobs = []mempher.NewJob{{Kind: mempher.JobKind("nonesuch")}}
 			},
 			wantErr: mempher.ErrInvalidJobKind,
 		},

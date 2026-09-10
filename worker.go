@@ -3,10 +3,12 @@
 package mempher
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"time"
 )
 
@@ -24,6 +26,9 @@ const (
 	DefaultRetryBackoff = 10 * time.Second
 	// MaxRetryBackoff caps the wait between attempts.
 	MaxRetryBackoff = 10 * time.Minute
+	// DefaultKnownFactLimit is how many of a scope's facts an [Extractor] is
+	// shown as context when a [WorkerConfig] does not say.
+	DefaultKnownFactLimit = 100
 )
 
 // WorkerConfig assembles a [Worker]. Store and Embedder are required;
@@ -36,6 +41,21 @@ type WorkerConfig struct {
 	Queue Queue
 	// Embedder produces the vectors. Required.
 	Embedder Embedder
+	// Extractor produces the facts. Optional: nil leaves L1 switched off, and
+	// the worker then never claims a [JobKindExtract] job, so an extract-less
+	// deployment does not starve one that runs alongside it.
+	Extractor Extractor
+	// FactStore is where facts are written. Optional: when nil, and Store
+	// also implements [FactStore], the store is used for both. Required once
+	// Extractor is set.
+	FactStore FactStore
+	// KnownFactLimit is how many of a scope's current facts are shown to the
+	// [Extractor] as context. Zero means [DefaultKnownFactLimit].
+	//
+	// It exists because that context is a prompt: an unbounded scope would
+	// grow one until the model refused it, and the failure would look like a
+	// broken extractor rather than a budget.
+	KnownFactLimit int
 	// Clock is the source of time. Nil means [SystemClock].
 	Clock Clock
 	// ID identifies this worker in job leases. Empty means a value derived
@@ -60,23 +80,37 @@ type WorkerConfig struct {
 	Logger *slog.Logger
 }
 
-// Worker drains the job queue: the consolidation loop, which in this stage only
-// encodes episodes into vectors. All model spend lives here, off the write path.
+// Worker drains the job queue: the consolidation loop, where every model call in
+// this library lives, off the write path.
+//
+// It encodes episodes into vectors, and, when given an [Extractor], extracts
+// facts from them. A worker claims only the kinds it was configured to handle,
+// so running one without an extractor alongside one with it divides the work
+// rather than starving half of it.
 //
 // Every job body must be idempotent, because leasing is at-least-once and a
 // reclaimed job runs again. Encoding is idempotent by construction: it derives
-// from an immutable episode and writes through an upsert.
+// from an immutable episode and writes through an upsert. Extraction is
+// idempotent because the [FactStore] records which episodes an extractor has
+// read, and declines to apply an extraction of episodes it has already seen.
 type Worker struct {
-	store    Store
-	queue    Queue
-	embedder Embedder
-	clock    Clock
-	log      *slog.Logger
-	id       WorkerID
-	batch    int
-	lease    time.Duration
-	poll     time.Duration
-	reclaim  time.Duration
+	store     Store
+	queue     Queue
+	embedder  Embedder
+	extractor Extractor
+	facts     FactStore
+	clock     Clock
+	log       *slog.Logger
+	id        WorkerID
+	batch     int
+	known     int
+	lease     time.Duration
+	poll      time.Duration
+	reclaim   time.Duration
+
+	// kinds is the closed set this worker will claim, fixed at construction
+	// from which ports it was given.
+	kinds []JobKind
 }
 
 // NewWorker assembles a [Worker] from cfg, resolving defaults and rejecting a
@@ -107,9 +141,21 @@ func NewWorker(cfg WorkerConfig) (*Worker, error) {
 		queue = asQueue
 	}
 
+	facts, err := resolveFactStore(cfg.Store, cfg.FactStore, cfg.Extractor, "new worker")
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Extractor != nil && cfg.Extractor.Model() == "" {
+		return nil, fmt.Errorf("mempher: new worker: extractor reports no model id: %w",
+			ErrInvalidConfig)
+	}
+
 	switch {
 	case cfg.Batch < 0:
 		return nil, fmt.Errorf("mempher: new worker: Batch is %d: %w", cfg.Batch, ErrInvalidConfig)
+	case cfg.KnownFactLimit < 0:
+		return nil, fmt.Errorf("mempher: new worker: KnownFactLimit is %d: %w",
+			cfg.KnownFactLimit, ErrInvalidConfig)
 	case cfg.LeaseDuration < 0:
 		return nil, fmt.Errorf("mempher: new worker: LeaseDuration is %s: %w",
 			cfg.LeaseDuration, ErrInvalidConfig)
@@ -122,16 +168,26 @@ func NewWorker(cfg WorkerConfig) (*Worker, error) {
 	}
 
 	w := &Worker{
-		store:    cfg.Store,
-		queue:    queue,
-		embedder: cfg.Embedder,
-		clock:    cfg.Clock,
-		log:      cfg.Logger,
-		id:       cfg.ID,
-		batch:    cfg.Batch,
-		lease:    cfg.LeaseDuration,
-		poll:     cfg.PollInterval,
-		reclaim:  cfg.ReclaimInterval,
+		store:     cfg.Store,
+		queue:     queue,
+		embedder:  cfg.Embedder,
+		extractor: cfg.Extractor,
+		facts:     facts,
+		clock:     cfg.Clock,
+		log:       cfg.Logger,
+		id:        cfg.ID,
+		batch:     cfg.Batch,
+		known:     cfg.KnownFactLimit,
+		lease:     cfg.LeaseDuration,
+		poll:      cfg.PollInterval,
+		reclaim:   cfg.ReclaimInterval,
+		kinds:     []JobKind{JobKindEncode},
+	}
+	if w.extractor != nil {
+		w.kinds = append(w.kinds, JobKindExtract)
+	}
+	if w.known == 0 {
+		w.known = DefaultKnownFactLimit
 	}
 	if w.clock == nil {
 		w.clock = SystemClock{}
@@ -226,7 +282,7 @@ func (w *Worker) logFailure(ctx context.Context, doing string, err error) {
 // what a one-shot command calls instead of a loop.
 func (w *Worker) DrainOnce(ctx context.Context) (int, error) {
 	jobs, err := w.queue.Lease(ctx, LeaseRequest{
-		Kinds:    []JobKind{JobKindEncode},
+		Kinds:    w.kinds,
 		Worker:   w.id,
 		Limit:    w.batch,
 		Duration: w.lease,
@@ -261,6 +317,14 @@ func (w *Worker) runJob(ctx context.Context, job Job) error {
 	switch job.Kind {
 	case JobKindEncode:
 		return w.encode(ctx, job)
+	case JobKindExtract:
+		if w.extractor == nil {
+			// Only reachable if a queue handed back a kind that was not asked
+			// for. Refusing beats extracting with no extractor.
+			return fmt.Errorf("job %s is an extract job but this worker has no Extractor: %w",
+				job.ID, ErrInvalidConfig)
+		}
+		return w.extract(ctx, job)
 	default:
 		return fmt.Errorf("job %s has kind %q: %w", job.ID, job.Kind, ErrInvalidJobKind)
 	}
@@ -303,6 +367,71 @@ func (w *Worker) encode(ctx context.Context, job Job) error {
 		}); err != nil {
 			return fmt.Errorf("write encoding for episode %s: %w", episode.ID, err)
 		}
+	}
+	return nil
+}
+
+// extract reads a job's episodes and records the facts they yield.
+//
+// Idempotence is the [FactStore]'s, not this function's: applying an extraction
+// of episodes an extractor has already read is declined, so the first result to
+// commit is the one that stands. A reclaimed job therefore still pays for its
+// model call and then throws the answer away. That is the right trade at
+// at-least-once: the alternative is asking the database whether the work is done
+// before doing it, which is a round trip on every job to save a model call on
+// the rare one.
+func (w *Worker) extract(ctx context.Context, job Job) error {
+	if len(job.Episodes) == 0 {
+		return fmt.Errorf("job %s names no episodes: %w", job.ID, ErrInvalidConfig)
+	}
+
+	episodes := make([]Episode, 0, len(job.Episodes))
+	for _, id := range job.Episodes {
+		episode, err := w.store.Episode(ctx, job.Scope, id)
+		if err != nil {
+			return fmt.Errorf("read episode %s: %w", id, err)
+		}
+		episodes = append(episodes, episode)
+	}
+	// Seq order, because an extractor reading a conversation out of order
+	// resolves "then" and "that" against the wrong episode.
+	slices.SortFunc(episodes, func(a, b Episode) int { return cmp.Compare(a.Seq, b.Seq) })
+	latest := episodes[len(episodes)-1]
+
+	// What the scope believed when these episodes arrived, valid at the moment
+	// they describe. Both cuts come from the episode rather than the clock,
+	// which is what lets a backfill reproduce the extraction it replaces
+	// instead of re-deciding it against today.
+	known, err := w.facts.Facts(ctx, FactQuery{
+		Scope:     job.Scope,
+		Extractor: w.extractor.Model(),
+		AsOf:      latest.IngestedAt,
+		At:        latest.OccurredAt,
+		Limit:     w.known,
+	})
+	if err != nil {
+		return fmt.Errorf("read the scope's known facts: %w", err)
+	}
+
+	result, err := w.extractor.Extract(ctx, ExtractRequest{
+		Scope:    job.Scope,
+		Episodes: episodes,
+		Known:    known,
+		Now:      w.clock.Now(),
+	})
+	if err != nil {
+		return fmt.Errorf("extract from %d episodes: %w", len(episodes), err)
+	}
+
+	if _, err := w.facts.ApplyExtraction(ctx, ExtractCommand{
+		Scope:     job.Scope,
+		Extractor: w.extractor.Model(),
+		Episodes:  job.Episodes,
+		Assert:    result.Assert,
+		Retract:   result.Retract,
+		At:        w.clock.Now(),
+	}); err != nil {
+		return fmt.Errorf("apply an extraction of %d episodes: %w", len(episodes), err)
 	}
 	return nil
 }

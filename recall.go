@@ -11,6 +11,9 @@ const (
 	// DefaultCandidatesPerChannel is how deep each channel searches before
 	// fusion, which needs more candidates than it returns.
 	DefaultCandidatesPerChannel = 50
+	// DefaultFactLimit is how many facts [Memory.Recall] returns when a
+	// request does not say.
+	DefaultFactLimit = 32
 )
 
 // Channel names one independent retrieval path. Channels run concurrently, each
@@ -26,12 +29,22 @@ const (
 	// an episode the instant it is appended, because the tsvector is a
 	// generated column.
 	ChannelLexical Channel = "lexical"
+	// ChannelFact reads L1: the facts currently believed about the scope.
+	//
+	// It is a channel for the two things a channel is for -- it can be
+	// switched off in [RecallRequest.Channels], and its failure is reported in
+	// [Recollection.Channels] rather than swallowed -- but it does not join
+	// the fusion. It contributes to [Recollection.Facts], not
+	// [Recollection.Episodes], because a fact and an episode are different
+	// kinds of evidence and ranking them against each other would assert an
+	// ordering that does not exist. The layers are not peers.
+	ChannelFact Channel = "fact"
 )
 
 // Valid reports whether c is one of the defined channels.
 func (c Channel) Valid() bool {
 	switch c {
-	case ChannelSemantic, ChannelLexical:
+	case ChannelSemantic, ChannelLexical, ChannelFact:
 		return true
 	default:
 		return false
@@ -119,8 +132,21 @@ type RecallRequest struct {
 	// Limit caps how many episodes are returned. Zero means
 	// [DefaultRecallLimit].
 	Limit int
-	// MaxTokens caps the total token cost of the returned content. Zero means
-	// no budget.
+	// FactLimit caps how many facts are returned. Zero means
+	// [DefaultFactLimit].
+	FactLimit int
+	// MinFactConfidence drops facts the extractor was less sure of than this.
+	// Zero keeps everything it asserted.
+	MinFactConfidence float32
+	// Subjects, when non-empty, keeps only facts about one of them. It does
+	// not filter episodes, which have no subject.
+	Subjects []Subject
+	// MaxTokens caps the total token cost of the returned content, facts and
+	// episodes together. Zero means no budget.
+	//
+	// Facts are budgeted first. They are the compact, current summary of the
+	// scope, so dropping them to fit one more transcript line is a bad trade
+	// at any budget; [Recollection.Truncated] says when it happened.
 	MaxTokens int
 }
 
@@ -163,19 +189,43 @@ type RecalledEpisode struct {
 	Tokens int
 }
 
+// RecalledFact is one fact in a [Recollection].
+//
+// It carries no fused score. Facts are not ranked against each other by
+// relevance to the query: what is true about a scope is true whether or not the
+// question mentioned it, and the query only decides which facts survive
+// [RecallRequest.FactLimit] when there are more than fit.
+type RecalledFact struct {
+	// Fact is the fact itself, with its validity window and provenance.
+	Fact Fact
+	// Tokens is the counted cost of the fact's statement.
+	Tokens int
+}
+
 // Recollection is what [Memory.Recall] returns.
 type Recollection struct {
 	// Scope is the partition searched.
 	Scope ScopeID
-	// AsOf is the system-time cut actually applied. Replaying the same
-	// request with this value reproduces the result.
+	// AsOf is the system-time cut actually applied.
+	//
+	// Replaying the same request with this value reproduces the episode
+	// results exactly. It bounds the facts too, to those asserted at or
+	// before it, but L1 records only what is currently believed about the
+	// past and not what was believed at a past instant: a fact retracted
+	// since will be absent from a replay that once returned it. L0 is what is
+	// reproducible; a projection is what is current.
 	AsOf time.Time
+	// Facts are the facts believed about the scope, ordered by subject and
+	// predicate. They are evidence of a different kind from Episodes, so they
+	// are returned beside them rather than mixed in.
+	Facts []RecalledFact
 	// Episodes are the fused results, best first.
 	Episodes []RecalledEpisode
 	// Channels reports what each channel contributed, including failures.
 	Channels []ChannelReport
-	// Tokens is the total counted cost of the returned content.
+	// Tokens is the total counted cost of the returned content, facts and
+	// episodes together.
 	Tokens int
-	// Truncated reports that the limit or token budget cut results.
+	// Truncated reports that a limit or the token budget cut results.
 	Truncated bool
 }

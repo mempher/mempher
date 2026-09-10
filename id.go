@@ -87,6 +87,42 @@ func (id JobID) String() string { return uuid.UUID(id).String() }
 // IsZero reports whether the id is unset.
 func (id JobID) IsZero() bool { return id == JobID{} }
 
+// FactID is a fact's surrogate key, a uuidv7 minted by the database.
+//
+// A fact's real identity is its scope, extractor, subject, predicate, object and
+// validity window, which is what the temporal primary key enforces. This id sits
+// beside that so a fact can be named by something that does not move when its
+// window is closed.
+type FactID uuid.UUID
+
+// ParseFactID parses the canonical textual form of a fact id.
+func ParseFactID(s string) (FactID, error) {
+	id, err := uuid.Parse(s)
+	if err != nil {
+		return FactID{}, fmt.Errorf("mempher: parse fact id %q: %w", s, err)
+	}
+	return FactID(id), nil
+}
+
+// String returns the canonical textual form of the id.
+func (id FactID) String() string { return uuid.UUID(id).String() }
+
+// IsZero reports whether the id is unset.
+func (id FactID) IsZero() bool { return id == FactID{} }
+
+// MarshalText implements [encoding.TextMarshaler].
+func (id FactID) MarshalText() ([]byte, error) { return []byte(id.String()), nil }
+
+// UnmarshalText implements [encoding.TextUnmarshaler].
+func (id *FactID) UnmarshalText(text []byte) error {
+	parsed, err := ParseFactID(string(text))
+	if err != nil {
+		return err
+	}
+	*id = parsed
+	return nil
+}
+
 // ModelID identifies an embedding model precisely enough to re-embed against,
 // including any version that changes the vector space. Encodings are keyed by
 // it, so several models can coexist and a model change is a backfill.
@@ -94,6 +130,15 @@ type ModelID string
 
 // String returns the model identifier.
 func (m ModelID) String() string { return string(m) }
+
+// ExtractorID identifies an extractor precisely enough to re-extract against.
+// It must change when the model changes, and also when the prompt or the output
+// schema does: all three decide what facts come out, and a value that survives a
+// prompt rewrite silently mixes two extractors' opinions in one scope.
+type ExtractorID string
+
+// String returns the extractor identifier.
+func (e ExtractorID) String() string { return string(e) }
 
 // WorkerID identifies one worker process holding a job lease.
 type WorkerID string
@@ -116,3 +161,19 @@ type Source string
 
 // String returns the source label.
 func (s Source) String() string { return string(s) }
+
+// Subject names what a fact is about, within its scope: "user", "user:8123",
+// "project:apollo". It is caller- and extractor-defined rather than an
+// enumeration, and it is the first axis facts are grouped and looked up by.
+type Subject string
+
+// String returns the subject label.
+func (s Subject) String() string { return string(s) }
+
+// Predicate names the relation a fact asserts: "allergic_to", "prefers",
+// "lives_in". Keeping it a short, stable slug rather than free text is what
+// makes two extractions of the same claim recognisably the same claim.
+type Predicate string
+
+// String returns the predicate label.
+func (p Predicate) String() string { return string(p) }

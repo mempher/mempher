@@ -24,6 +24,15 @@ type Config struct {
 	// Embedder turns text into vectors. Required. [Memory.Append] never
 	// calls it; only [Memory.Recall] and [Worker] do.
 	Embedder Embedder
+	// Extractor turns episodes into facts. Optional: nil leaves L1 switched
+	// off, so [Memory.Append] enqueues no extract job and [Memory.Recall]
+	// returns no facts. [Memory] never calls it -- only a [Worker] does --
+	// but it is named here because recall reads the facts it is keyed by.
+	Extractor Extractor
+	// FactStore persists L1. Optional: when nil, and Store also implements
+	// [FactStore], the store is used for both. Required once Extractor is
+	// set, and meaningless without it.
+	FactStore FactStore
 	// Clock is the source of time. Nil means [SystemClock].
 	Clock Clock
 	// TokenCounter measures returned content. Nil means
@@ -43,6 +52,8 @@ type Memory struct {
 	store        Store
 	queue        Queue
 	embedder     Embedder
+	extractor    Extractor
+	facts        FactStore
 	clock        Clock
 	tokens       TokenCounter
 	fusion       FusionOptions
@@ -79,6 +90,14 @@ func New(cfg Config) (*Memory, error) {
 		queue = asQueue
 	}
 
+	facts, err := resolveFactStore(cfg.Store, cfg.FactStore, cfg.Extractor, "new")
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Extractor != nil && cfg.Extractor.Model() == "" {
+		return nil, fmt.Errorf("mempher: new: extractor reports no model id: %w", ErrInvalidConfig)
+	}
+
 	fusion, err := cfg.Fusion.resolve()
 	if err != nil {
 		return nil, fmt.Errorf("mempher: new: %w", err)
@@ -91,6 +110,8 @@ func New(cfg Config) (*Memory, error) {
 		store:        cfg.Store,
 		queue:        queue,
 		embedder:     cfg.Embedder,
+		extractor:    cfg.Extractor,
+		facts:        facts,
 		clock:        cfg.Clock,
 		tokens:       cfg.TokenCounter,
 		fusion:       fusion,
@@ -110,10 +131,11 @@ func New(cfg Config) (*Memory, error) {
 
 // Append records one episode and returns it as persisted.
 //
-// This is the write loop: validate, insert the episode, enqueue the encode job
-// in the same statement, return. It makes no model call, so its latency is one
-// round trip. The episode is lexically searchable the moment Append returns, and
-// semantically searchable once a [Worker] drains the encode job.
+// This is the write loop: validate, insert the episode, enqueue the work it
+// implies in the same statement, return. It makes no model call, so its latency
+// is one round trip. The episode is lexically searchable the moment Append
+// returns, semantically searchable once a [Worker] drains its encode job, and
+// has yielded whatever facts it holds once a worker drains its extract job.
 //
 // Append never modifies an existing episode. Recording a correction means
 // appending another one.
@@ -141,9 +163,9 @@ func (m *Memory) Append(ctx context.Context, req AppendRequest) (Episode, error)
 			// that has already been recorded.
 			Binding: req.Binding.Clone(),
 		},
-		// The one thing an episode implies in this stage. It commits with the
-		// episode, so it cannot be lost.
-		Jobs: []NewJob{{Kind: JobKindEncode, Scope: req.Scope}},
+		// What this episode implies. They commit with it, so neither can be
+		// lost to a crash between two statements.
+		Jobs: m.jobsFor(req.Scope),
 	})
 	if err != nil {
 		return Episode{}, err
@@ -187,18 +209,46 @@ func (m *Memory) Recall(ctx context.Context, req RecallRequest) (Recollection, e
 	// a deep result and a shallow search gets the deeper of the two.
 	depth = max(depth, limit)
 
-	channels := resolveChannels(req.Channels)
-	query := ChannelQuery{
-		Scope:        req.Scope,
-		AsOf:         asOf,
-		OccurredFrom: req.OccurredFrom,
-		OccurredTo:   req.OccurredTo,
-		Binding:      req.Binding.Clone(),
-		Roles:        slices.Clone(req.Roles),
-		Limit:        depth,
+	factLimit := req.FactLimit
+	if factLimit == 0 {
+		factLimit = DefaultFactLimit
 	}
 
-	results := m.runChannels(ctx, channels, query, req.Query)
+	// The event-time instant facts must hold at. An explicit event-time window
+	// means the caller is asking about its end; otherwise the cut is AsOf,
+	// which is the clock unless the caller pinned it to reproduce a result.
+	factsAt := req.OccurredTo
+	if factsAt.IsZero() {
+		factsAt = asOf
+	}
+
+	channels := m.resolveChannels(req.Channels)
+	plan := recallPlan{
+		text: req.Query,
+		episodes: ChannelQuery{
+			Scope:        req.Scope,
+			AsOf:         asOf,
+			OccurredFrom: req.OccurredFrom,
+			OccurredTo:   req.OccurredTo,
+			Binding:      req.Binding.Clone(),
+			Roles:        slices.Clone(req.Roles),
+			Limit:        depth,
+		},
+		facts: FactQuery{
+			Scope:         req.Scope,
+			AsOf:          asOf,
+			At:            factsAt,
+			Subjects:      slices.Clone(req.Subjects),
+			MinConfidence: req.MinFactConfidence,
+			Text:          req.Query,
+			Limit:         factLimit,
+		},
+	}
+	if m.extractor != nil {
+		plan.facts.Extractor = m.extractor.Model()
+	}
+
+	results := m.runChannels(ctx, channels, plan)
 
 	// Cancellation is not a channel failure, and reporting it as one would bury
 	// the reason under a summary.
@@ -217,9 +267,28 @@ func (m *Memory) Recall(ctx context.Context, req RecallRequest) (Recollection, e
 	for i, r := range results {
 		out.Channels[i] = ChannelReport{
 			Channel:    r.channel,
-			Candidates: len(r.candidates),
+			Candidates: len(r.candidates) + len(r.facts),
 			Duration:   r.elapsed,
 			Err:        r.err,
+		}
+	}
+
+	// Facts take the budget first. They are the compact, current summary of
+	// the scope, so trading one away for another line of transcript is a bad
+	// deal at any budget.
+	for _, r := range results {
+		for _, fact := range r.facts {
+			if len(out.Facts) >= factLimit {
+				out.Truncated = true
+				break
+			}
+			cost := m.tokens.CountTokens(fact.Statement)
+			if req.MaxTokens > 0 && out.Tokens+cost > req.MaxTokens {
+				out.Truncated = true
+				break
+			}
+			out.Facts = append(out.Facts, RecalledFact{Fact: fact, Tokens: cost})
+			out.Tokens += cost
 		}
 	}
 
@@ -245,8 +314,7 @@ func (m *Memory) Recall(ctx context.Context, req RecallRequest) (Recollection, e
 func (m *Memory) runChannels(
 	ctx context.Context,
 	channels []Channel,
-	query ChannelQuery,
-	text string,
+	plan recallPlan,
 ) []channelResult {
 	results := make([]channelResult, len(channels))
 	var wg sync.WaitGroup
@@ -258,10 +326,11 @@ func (m *Memory) runChannels(
 			// Wall-clock, deliberately: this measures how long the work took,
 			// which a logical test Clock would report as zero.
 			started := time.Now()
-			candidates, err := m.runChannel(ctx, channel, query, text)
+			candidates, facts, err := m.runChannel(ctx, channel, plan)
 			results[i] = channelResult{
 				channel:    channel,
 				candidates: candidates,
+				facts:      facts,
 				elapsed:    time.Since(started),
 				err:        err,
 			}
@@ -269,6 +338,15 @@ func (m *Memory) runChannels(
 	}
 	wg.Wait()
 	return results
+}
+
+// recallPlan is everything the channels need, resolved once before the fan-out
+// so that every channel sees exactly the same cuts. Two channels resolving "now"
+// a millisecond apart would make a result that cannot be replayed.
+type recallPlan struct {
+	episodes ChannelQuery
+	facts    FactQuery
+	text     string
 }
 
 // runChannel is one channel's whole job, embedding included.
@@ -279,32 +357,50 @@ func (m *Memory) runChannels(
 func (m *Memory) runChannel(
 	ctx context.Context,
 	channel Channel,
-	query ChannelQuery,
-	text string,
-) ([]Candidate, error) {
+	plan recallPlan,
+) ([]Candidate, []Fact, error) {
 	switch channel {
 	case ChannelSemantic:
-		vector, err := m.embedder.EmbedQuery(ctx, text)
+		vector, err := m.embedder.EmbedQuery(ctx, plan.text)
 		if err != nil {
-			return nil, fmt.Errorf("embed query: %w", err)
+			return nil, nil, fmt.Errorf("embed query: %w", err)
 		}
-		return m.store.SearchSemantic(ctx, SemanticQuery{
-			ChannelQuery: query,
+		candidates, err := m.store.SearchSemantic(ctx, SemanticQuery{
+			ChannelQuery: plan.episodes,
 			Vector:       vector,
 			Model:        m.embedder.Model(),
 		})
+		return candidates, nil, err
 	case ChannelLexical:
-		return m.store.SearchLexical(ctx, LexicalQuery{ChannelQuery: query, Text: text})
+		candidates, err := m.store.SearchLexical(ctx,
+			LexicalQuery{ChannelQuery: plan.episodes, Text: plan.text})
+		return candidates, nil, err
+	case ChannelFact:
+		// Asked for explicitly on a Memory with no Extractor. Reported as this
+		// channel failing, like any other channel that cannot answer, so the
+		// rest of the result still arrives and the reason is in
+		// [Recollection.Channels] rather than swallowed.
+		if m.facts == nil {
+			return nil, nil, fmt.Errorf(
+				"the fact channel needs an Extractor and a FactStore: %w", ErrInvalidConfig)
+		}
+		facts, err := m.facts.Facts(ctx, plan.facts)
+		return nil, facts, err
 	default:
-		return nil, fmt.Errorf("mempher: channel %q: %w", channel, ErrInvalidChannel)
+		return nil, nil, fmt.Errorf("mempher: channel %q: %w", channel, ErrInvalidChannel)
 	}
 }
 
 // resolveChannels returns the channels to run, in a stable order and without
-// repeats. No channels named means all of them.
-func resolveChannels(requested []Channel) []Channel {
+// repeats. No channels named means every channel this [Memory] can answer, which
+// excludes [ChannelFact] when no [Extractor] was configured: a default that
+// failed on every call would make L1 opt-out rather than opt-in.
+func (m *Memory) resolveChannels(requested []Channel) []Channel {
 	if len(requested) == 0 {
-		return []Channel{ChannelSemantic, ChannelLexical}
+		if m.facts == nil {
+			return []Channel{ChannelSemantic, ChannelLexical}
+		}
+		return []Channel{ChannelSemantic, ChannelLexical, ChannelFact}
 	}
 	out := make([]Channel, 0, len(requested))
 	for _, channel := range requested {
@@ -330,4 +426,41 @@ func allFailed(results []channelResult) error {
 		return nil
 	}
 	return fmt.Errorf("mempher: recall: %w: %w", ErrAllChannelsFailed, errors.Join(causes...))
+}
+
+// jobsFor is the deferred work one new episode implies. A [Store] fills in the
+// episode id, and the jobs commit with the episode.
+func (m *Memory) jobsFor(scope ScopeID) []NewJob {
+	jobs := []NewJob{{Kind: JobKindEncode, Scope: scope}}
+	if m.facts != nil {
+		jobs = append(jobs, NewJob{Kind: JobKindExtract, Scope: scope})
+	}
+	return jobs
+}
+
+// resolveFactStore picks the [FactStore] a configuration implies, and rejects
+// the combinations that cannot work.
+//
+// L1 is opt-in through [Extractor], because it is the port that costs money.
+// A FactStore without one is the configuration worth catching: nothing would
+// name the facts to read or write, so recall would silently return none.
+func resolveFactStore(store Store, explicit FactStore, extractor Extractor, op string) (FactStore, error) {
+	if extractor == nil {
+		if explicit != nil {
+			return nil, fmt.Errorf(
+				"mempher: %s: FactStore is set but Extractor is nil, so nothing would "+
+					"produce or name the facts: %w", op, ErrInvalidConfig)
+		}
+		return nil, nil
+	}
+	if explicit != nil {
+		return explicit, nil
+	}
+	asFactStore, ok := store.(FactStore)
+	if !ok {
+		return nil, fmt.Errorf(
+			"mempher: %s: FactStore is required because %T does not implement mempher.FactStore: %w",
+			op, store, ErrInvalidConfig)
+	}
+	return asFactStore, nil
 }

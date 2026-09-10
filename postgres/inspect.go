@@ -19,8 +19,12 @@ const MinServerVersionNum = 180000
 
 // requiredExtensions are what the schema cannot be built without: pgvector for
 // the vector type and HNSW index, btree_gin for the text operator class that
-// lets one GIN index cover both scope_id and the tsvector.
-var requiredExtensions = []string{"vector", "btree_gin"}
+// lets one GIN index cover both scope_id and the tsvector, and btree_gist for
+// the scalar operator classes a WITHOUT OVERLAPS temporal key needs.
+//
+// This is a pre-flight check, and it exists so a role without CREATE EXTENSION
+// fails here with a legible message rather than partway through a migration.
+var requiredExtensions = []string{"vector", "btree_gin", "btree_gist"}
 
 // serverInfo is what this adapter checks before it will talk to a database.
 type serverInfo struct {

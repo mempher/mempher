@@ -255,7 +255,7 @@ func TestEnumsRejectUnknownValues(t *testing.T) {
 		if Channel("telepathy").Valid() || Channel("").Valid() {
 			t.Error("unknown channels should be invalid")
 		}
-		if JobKind("extract").Valid() || JobKind("").Valid() {
+		if JobKind("nonesuch").Valid() || JobKind("").Valid() {
 			t.Error("unknown job kinds should be invalid")
 		}
 		if JobState("zombie").Valid() || JobState("").Valid() {
