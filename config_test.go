@@ -37,6 +37,9 @@ func (storeOnly) PendingEncodings(context.Context, PendingEncodings) ([]EpisodeI
 func (storeOnly) Scopes(context.Context, ScopeQuery) ([]Scope, error) {
 	return nil, errTestDouble
 }
+func (storeOnly) Forget(context.Context, ForgetRequest) (ForgetResult, error) {
+	return ForgetResult{}, errTestDouble
+}
 
 // storeAndQueue is shaped like the real postgres adapter: one type serving both
 // ports off one pool.

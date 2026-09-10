@@ -53,5 +53,26 @@
 // deletes finished rows. [Store.Scopes] lists the partitions of L0, which is how
 // work spanning all of them is walked.
 //
-// Forgetting and procedural memory are not implemented.
+// # Forgetting
+//
+// Two different things go by that name, and only one of them destroys anything.
+//
+// A claim the world has moved past has its validity window closed and stays
+// answerable, so "where did they live last year" still has an answer. That is
+// not forgetting, it is remembering accurately, and nothing is removed for it.
+//
+// [Memory.Forget] is the other one: erasure, for when the person the memory is
+// about asks for it. It removes episodes and every projection derived from them,
+// a whole scope at a time or a named few episodes, in one transaction. It is the
+// single exception to the append-only invariant, and a narrow one -- rows may be
+// deleted from L0 inside a transaction that declares itself, while an episode is
+// still never updated and never truncated. A row that exists is still exactly
+// what was recorded.
+//
+// Facts standing on an erased episode are deleted rather than closed, because a
+// closed window still says what it said. They are safe to delete for the reason
+// every projection is: if the episodes that remain still support the claim, the
+// next extraction re-derives it.
+//
+// Retention, decay and procedural memory are not implemented.
 package mempher

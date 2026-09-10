@@ -443,5 +443,23 @@ func (r BackfillRequest) Validate() error {
 	return nil
 }
 
+// Validate reports whether the request can be erased. [Memory.Forget] calls it,
+// so calling it yourself is only useful to reject input earlier.
+func (r ForgetRequest) Validate() error {
+	if err := r.Scope.Validate(); err != nil {
+		return err
+	}
+	if len(r.Episodes) > MaxForgetEpisodes {
+		return fmt.Errorf("mempher: forget names %d episodes, limit is %d: %w",
+			len(r.Episodes), MaxForgetEpisodes, ErrInvalidConfig)
+	}
+	for i, id := range r.Episodes {
+		if id.IsZero() {
+			return fmt.Errorf("mempher: forget episode %d is unset: %w", i, ErrInvalidConfig)
+		}
+	}
+	return nil
+}
+
 // timeFormat renders instants in error messages: RFC 3339 with milliseconds.
 const timeFormat = "2006-01-02T15:04:05.000Z07:00"

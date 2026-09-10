@@ -490,6 +490,43 @@ func TestBackfillRequestValidate(t *testing.T) {
 	}
 }
 
+func TestForgetRequestValidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		req     ForgetRequest
+		wantErr error
+	}{
+		{name: "a whole scope", req: ForgetRequest{Scope: "user:1"}},
+		{
+			name: "named episodes",
+			req:  ForgetRequest{Scope: "user:1", Episodes: []EpisodeID{{1}, {2}}},
+		},
+		{name: "no scope", req: ForgetRequest{}, wantErr: ErrInvalidScope},
+		{
+			name:    "an unset episode id",
+			req:     ForgetRequest{Scope: "user:1", Episodes: []EpisodeID{{}}},
+			wantErr: ErrInvalidConfig,
+		},
+		{
+			name: "more episodes than one erasure may name",
+			req: ForgetRequest{
+				Scope:    "user:1",
+				Episodes: make([]EpisodeID, MaxForgetEpisodes+1),
+			},
+			wantErr: ErrInvalidConfig,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assertValidation(t, tc.req.Validate(), tc.wantErr)
+		})
+	}
+}
+
 // assertValidation is the check every table above ends with.
 func assertValidation(t *testing.T, err, want error) {
 	t.Helper()

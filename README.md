@@ -8,7 +8,6 @@
 
 ![Status](https://img.shields.io/badge/status-in%20development-orange)
 [![CI](https://github.com/mempher/mempher/actions/workflows/ci.yml/badge.svg)](https://github.com/mempher/mempher/actions/workflows/ci.yml)
-[![Security](https://github.com/mempher/mempher/actions/workflows/security.yml/badge.svg)](https://github.com/mempher/mempher/actions/workflows/security.yml)
 [![Coverage](https://codecov.io/gh/mempher/mempher/graph/badge.svg)](https://codecov.io/gh/mempher/mempher)
 [![Go Reference](https://pkg.go.dev/badge/github.com/mempher/mempher.svg)](https://pkg.go.dev/github.com/mempher/mempher)
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/mempher/mempher/badge)](https://securityscorecards.dev/viewer/?uri=github.com/mempher/mempher)
@@ -35,12 +34,14 @@ projection can be dropped and rebuilt at any time by replaying L0 through the
 same deriving code.
 
 Two rules follow, and the schema enforces both. A trigger on `episodes` rejects
-`UPDATE`, `DELETE` and `TRUNCATE`:
+`UPDATE` and `TRUNCATE` outright, and rejects `DELETE` unless the transaction has
+said it is erasing:
 
-- an episode is never updated and never deleted;
+- an episode is never updated — a row that exists is exactly what was recorded;
 - a projection is only ever written by a worker draining the job queue.
 
-That is what makes a bad extractor recoverable and forgetting safe.
+That is what makes a bad extractor recoverable, and what makes erasure a thing
+you can point at rather than a `DELETE` anyone can write.
 
 ```mermaid
 flowchart TB
@@ -82,7 +83,8 @@ first. A fact carries the window it holds over, so the answer to "where do they
 live?" and the answer to "where did they live last year?" are both still there.
 
 Nothing is ever deleted to make that work. A claim the world has moved past has
-its window closed, and stays answerable.
+its window closed, and stays answerable. Deleting is a separate operation with a
+separate name, below.
 
 <div align="center">
 <img src="assets/how-it-works.gif" alt="A fact is bounded in time rather than overwritten, so both now and last year still have an answer" width="700" />
@@ -153,6 +155,22 @@ That is what makes "drop the projection and replay L0" a real repair rather than
 a slogan. The queue itself is readable and prunable for the same reason —
 `Jobs` lists it by scope, kind and state, `Stats` gives each bucket's depth and
 age, `Retry` revives a dead job, `Purge` takes the history.
+
+## Forgetting means two things
+
+Closing a window is not deleting. When someone asks to be *erased*, that is
+`Forget` — the one operation here that destroys anything:
+
+```go
+// A whole scope, or name Episodes to take only some of them.
+res, err := mem.Forget(ctx, mempher.ForgetRequest{Scope: "user:8123"})
+```
+
+One transaction takes the episodes, their vectors, their extraction markers,
+their queued jobs, and every fact whose provenance names them. A fact is deleted
+rather than closed, because a closed window still says what it said — and that is
+safe for the reason every projection is safe: if what remains still supports the
+claim, the next extraction re-derives it.
 
 An episode is durable and **lexically** searchable the moment `Append` returns,
 because the `tsvector` is a generated column. It becomes **semantically**

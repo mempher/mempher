@@ -101,8 +101,12 @@ type Episode struct {
 	ID EpisodeID
 	// Scope is the partition this episode belongs to.
 	Scope ScopeID
-	// Seq is its position in the scope's log, starting at 1 and dense. It is
-	// what consolidation replays in order.
+	// Seq is its position in the scope's log, starting at 1 and allocated
+	// densely. It is what consolidation replays in order.
+	//
+	// Allocated densely, not necessarily dense for ever: erasing an episode
+	// leaves the number it held unused, and no later episode takes it. Nothing
+	// reads Seq as a count.
 	Seq int64
 	// Content is the episode text, verbatim.
 	Content string
