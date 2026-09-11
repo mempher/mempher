@@ -21,7 +21,7 @@ func seedScope(t *testing.T, store *postgres.Store, scope mempher.ScopeID) memph
 	if err != nil {
 		t.Fatalf("Append: %v", err)
 	}
-	return got.Episode.ID
+	return got.Episodes[0].ID
 }
 
 func newJob(scope mempher.ScopeID, id mempher.EpisodeID) mempher.NewJob {
@@ -57,7 +57,7 @@ func TestEnqueue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Append: %v", err)
 	}
-	id := second.Episode.ID
+	id := second.Episodes[0].ID
 
 	job, err := store.Enqueue(ctx, newJob("user:1", id), epoch)
 	if err != nil {
@@ -656,7 +656,7 @@ func jobless(t *testing.T, store *postgres.Store, scope mempher.ScopeID) mempher
 	if err != nil {
 		t.Fatalf("Append to %q: %v", scope, err)
 	}
-	return got.Episode.ID
+	return got.Episodes[0].ID
 }
 
 // early is a run_after before any job an Append enqueues, so that a job a test

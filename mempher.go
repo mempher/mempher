@@ -151,7 +151,7 @@ func (m *Memory) Append(ctx context.Context, req AppendRequest) (Episode, error)
 	}
 
 	result, err := m.store.Append(ctx, AppendCommand{
-		Episode: NewEpisode{
+		Episodes: []NewEpisode{{
 			Scope:      req.Scope,
 			Content:    req.Content,
 			Role:       req.Role,
@@ -162,7 +162,7 @@ func (m *Memory) Append(ctx context.Context, req AppendRequest) (Episode, error)
 			// Cloned, so a caller reusing its map cannot change an episode
 			// that has already been recorded.
 			Binding: req.Binding.Clone(),
-		},
+		}},
 		// What this episode implies. They commit with it, so neither can be
 		// lost to a crash between two statements.
 		Jobs: m.jobsFor(req.Scope),
@@ -170,7 +170,79 @@ func (m *Memory) Append(ctx context.Context, req AppendRequest) (Episode, error)
 	if err != nil {
 		return Episode{}, err
 	}
-	return result.Episode, nil
+	return result.Episodes[0], nil
+}
+
+// AppendBatch records several episodes of one scope in a single round trip, and
+// returns them as persisted, in the order given.
+//
+// It is [Memory.Append] for the case a caller already has more than one episode
+// in hand -- a conversation turn that produced a question, a tool call and an
+// answer, or a page of an import. Everything true of Append is true here: no
+// model call, one round trip, and the episodes plus the work they imply commit
+// together or not at all.
+//
+// What it buys is amortisation, and the saving is mostly not in this library.
+// One round trip and one commit are shared by the whole batch, and so is the
+// consolidation that follows: a batch yields one encode job naming all of its
+// episodes, which a [Worker] satisfies with one call to
+// [Embedder.EmbedDocuments] rather than one per episode. That is where the money
+// goes.
+//
+// Every request must name the same scope. Sequence allocation is a lock on that
+// scope's row, so a batch spanning two scopes would hold two of them at once and
+// two such batches in opposite orders would deadlock. Appending across scopes is
+// a loop of these calls, which holds one lock at a time.
+//
+// The episodes are sequenced in the order given and share one ingest instant:
+// they were recorded together, so an as-of cut that returns one of them returns
+// all of them.
+func (m *Memory) AppendBatch(ctx context.Context, reqs []AppendRequest) ([]Episode, error) {
+	switch {
+	case len(reqs) == 0:
+		return nil, fmt.Errorf("mempher: append batch: no episodes: %w", ErrInvalidConfig)
+	case len(reqs) > MaxAppendBatch:
+		return nil, fmt.Errorf("mempher: append batch holds %d episodes, limit is %d: %w",
+			len(reqs), MaxAppendBatch, ErrInvalidConfig)
+	}
+
+	now := m.clock.Now()
+	scope := reqs[0].Scope
+	episodes := make([]NewEpisode, len(reqs))
+	for i, req := range reqs {
+		if err := req.Validate(); err != nil {
+			return nil, fmt.Errorf("mempher: append batch: episode %d: %w", i, err)
+		}
+		if req.Scope != scope {
+			return nil, fmt.Errorf(
+				"mempher: append batch: episode %d names scope %q, not %q: a batch is one "+
+					"scope, because sequencing locks its row: %w",
+				i, req.Scope, scope, ErrInvalidConfig)
+		}
+		occurred := req.OccurredAt
+		if occurred.IsZero() {
+			occurred = now
+		}
+		episodes[i] = NewEpisode{
+			Scope:      req.Scope,
+			Content:    req.Content,
+			Role:       req.Role,
+			Actor:      req.Actor,
+			Source:     req.Source,
+			OccurredAt: occurred,
+			IngestedAt: now,
+			Binding:    req.Binding.Clone(),
+		}
+	}
+
+	result, err := m.store.Append(ctx, AppendCommand{
+		Episodes: episodes,
+		Jobs:     m.jobsFor(scope),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result.Episodes, nil
 }
 
 // Recall returns the episodes most worth putting in front of a model, best

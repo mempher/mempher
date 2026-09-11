@@ -18,54 +18,103 @@ import (
 const episodeColumns = `id, scope_id, seq, content, role, actor, source,
 	occurred_at, ingested_at, binding`
 
-// appendSQL inserts a scope row, an episode and the episode's jobs in one
-// statement, so an episode can never commit without the work it implies.
+// appendSQL inserts a scope row, a batch of episodes and the jobs they imply in
+// one statement, so an episode can never commit without the work it implies.
 //
-// The scope upsert doubles as the sequence allocator: ON CONFLICT DO UPDATE
-// returns last_seq + 1, which makes per-scope sequences dense and gap-free with
-// no explicit lock and no extra round trip. Concurrent appends to one scope
-// serialise on that row, which is the right semantics for a totally ordered log.
+// The scope upsert doubles as the sequence allocator: it adds the batch size to
+// last_seq and returns what it was, so the batch takes a contiguous block of
+// sequence numbers with no explicit lock and no extra round trip. Concurrent
+// appends to one scope serialise on that row, which is the right semantics for a
+// totally ordered log -- and is also why a command names one scope.
 //
-// Only id and seq come back. Everything else was supplied by the caller and the
-// schema transforms nothing, so reading a 1 MiB content column back would be
-// pure waste. The jobs arrive one row each through a LEFT JOIN, which still
-// yields the episode row when there are none.
+// WITH ORDINALITY is what places each episode: input row n gets seq base + n, so
+// the order the caller gave is the order the log takes, and the returned seq is
+// enough to match a minted id back to the input that produced it. An INSERT ...
+// SELECT does not promise to RETURN rows in any order, and this does not need it
+// to.
+//
+// One job per kind names every episode in the batch, rather than one job per
+// episode. That is what lets a worker embed a whole turn in one model call.
+//
+// The two result sets are concatenated rather than joined, so a batch of n
+// episodes and m jobs comes back as n+m rows instead of n*m. A row with a null
+// seq is a job.
 const appendSQL = `
 WITH scope AS (
     INSERT INTO mempher.scopes (id, last_seq, created_at)
-    VALUES ($1, 1, $7)
-    ON CONFLICT (id) DO UPDATE SET last_seq = scopes.last_seq + 1
-    RETURNING last_seq
+    VALUES ($1, $2, $3)
+    ON CONFLICT (id) DO UPDATE SET last_seq = scopes.last_seq + $2
+    RETURNING last_seq - $2 AS base
+), input AS (
+    SELECT * FROM unnest($4::text[], $5::text[], $6::text[], $7::text[],
+                         $8::timestamptz[], $9::timestamptz[], $10::jsonb[])
+        WITH ORDINALITY AS e(content, role, actor, source,
+                             occurred_at, ingested_at, binding, ord)
 ), episode AS (
     INSERT INTO mempher.episodes
         (scope_id, seq, content, role, actor, source, occurred_at, ingested_at, binding)
-    SELECT $1, scope.last_seq, $2, $3, $4, $5, $6, $7, $8
-    FROM scope
+    SELECT $1, scope.base + input.ord, input.content, input.role, input.actor,
+           input.source, input.occurred_at, input.ingested_at, input.binding
+    FROM scope, input
     RETURNING id, seq
 ), job AS (
     INSERT INTO mempher.jobs
         (kind, scope_id, episode_ids, run_after, max_attempts, created_at, updated_at)
-    SELECT spec.kind, $1, ARRAY[episode.id], spec.run_after, spec.max_attempts, $7, $7
-    FROM episode,
-         unnest($9::text[], $10::timestamptz[], $11::int[])
+    SELECT spec.kind, $1,
+           (SELECT array_agg(episode.id ORDER BY episode.seq) FROM episode),
+           spec.run_after, spec.max_attempts, $3, $3
+    FROM unnest($11::text[], $12::timestamptz[], $13::int[])
              AS spec(kind, run_after, max_attempts)
     ON CONFLICT (kind, scope_id, episode_ids) WHERE state IN ('pending', 'running')
         DO NOTHING
     RETURNING id, kind, state, attempts, max_attempts, run_after, created_at, updated_at
 )
 SELECT episode.id, episode.seq,
+       NULL::uuid, NULL::text, NULL::text, NULL::int, NULL::int,
+       NULL::timestamptz, NULL::timestamptz, NULL::timestamptz
+FROM episode
+UNION ALL
+SELECT NULL::uuid, NULL::bigint,
        job.id, job.kind, job.state, job.attempts, job.max_attempts,
        job.run_after, job.created_at, job.updated_at
-FROM episode LEFT JOIN job ON true
-ORDER BY job.kind NULLS LAST`
+FROM job
+ORDER BY 2 NULLS LAST`
 
-// Append inserts one episode and the jobs it implies, atomically, creating the
-// scope if this is its first episode.
+// Append inserts a batch of episodes and the jobs they imply, atomically,
+// creating the scope if this is its first episode.
+//
+// A batch of one is the ordinary case and takes the same path, so the single and
+// the batched append cannot drift apart.
 func (s *Store) Append(ctx context.Context, cmd mempher.AppendCommand) (mempher.AppendResult, error) {
 	if err := validateAppend(cmd); err != nil {
 		return mempher.AppendResult{}, fmt.Errorf("mempher/postgres: append: %w", err)
 	}
-	ep := cmd.Episode
+	n := len(cmd.Episodes)
+	// One instant stands for the batch where the schema needs a single one:
+	// when the scope was created, and when its jobs were queued.
+	at := cmd.Episodes[0].IngestedAt
+
+	contents := make([]string, n)
+	roles := make([]string, n)
+	actors := make([]string, n)
+	sources := make([]string, n)
+	occurredAt := make([]time.Time, n)
+	ingestedAt := make([]time.Time, n)
+	bindings := make([]mempher.Binding, n)
+	for i, ep := range cmd.Episodes {
+		contents[i] = ep.Content
+		roles[i] = string(ep.Role)
+		actors[i] = string(ep.Actor)
+		sources[i] = string(ep.Source)
+		occurredAt[i] = ep.OccurredAt
+		ingestedAt[i] = ep.IngestedAt
+		// The column is NOT NULL and CHECKed to be a JSON object, and a nil
+		// map marshals to null, so an absent binding is sent as an empty one.
+		bindings[i] = ep.Binding
+		if bindings[i] == nil {
+			bindings[i] = mempher.Binding{}
+		}
+	}
 
 	kinds := make([]string, len(cmd.Jobs))
 	runAfters := make([]time.Time, len(cmd.Jobs))
@@ -74,7 +123,7 @@ func (s *Store) Append(ctx context.Context, cmd mempher.AppendCommand) (mempher.
 		kinds[i] = string(job.Kind)
 		runAfters[i] = job.RunAfter
 		if runAfters[i].IsZero() {
-			runAfters[i] = ep.IngestedAt
+			runAfters[i] = at
 		}
 		maxAttempts[i] = int32(job.MaxAttempts)
 		if maxAttempts[i] == 0 {
@@ -82,39 +131,22 @@ func (s *Store) Append(ctx context.Context, cmd mempher.AppendCommand) (mempher.
 		}
 	}
 
-	// The column is NOT NULL and CHECKed to be a JSON object, and a nil map
-	// marshals to null, so an absent binding is sent as an empty object.
-	binding := ep.Binding
-	if binding == nil {
-		binding = mempher.Binding{}
-	}
-
 	rows, err := s.pool.Query(ctx, appendSQL,
-		string(ep.Scope), ep.Content, string(ep.Role), string(ep.Actor), string(ep.Source),
-		ep.OccurredAt, ep.IngestedAt, binding,
+		string(cmd.Episodes[0].Scope), int32(n), at,
+		contents, roles, actors, sources, occurredAt, ingestedAt, bindings,
 		kinds, runAfters, maxAttempts,
 	)
 	if err != nil {
-		return mempher.AppendResult{}, wrapAppendError(err, ep)
+		return mempher.AppendResult{}, wrapAppendError(err, cmd.Episodes[0])
 	}
 	defer rows.Close()
 
-	result := mempher.AppendResult{Episode: mempher.Episode{
-		Scope:      ep.Scope,
-		Content:    ep.Content,
-		Role:       ep.Role,
-		Actor:      ep.Actor,
-		Source:     ep.Source,
-		OccurredAt: ep.OccurredAt.UTC(),
-		IngestedAt: ep.IngestedAt.UTC(),
-		Binding:    ep.Binding.Clone(),
-	}}
-
-	seen := false
+	result := mempher.AppendResult{Episodes: make([]mempher.Episode, 0, n)}
+	var ids []mempher.EpisodeID
 	for rows.Next() {
 		var (
-			episodeID   uuid.UUID
-			seq         int64
+			episodeID   *uuid.UUID
+			seq         *int64
 			jobID       *uuid.UUID
 			jobKind     *string
 			jobState    *string
@@ -128,19 +160,31 @@ func (s *Store) Append(ctx context.Context, cmd mempher.AppendCommand) (mempher.
 			&attempts, &jobMaxTries, &runAfter, &createdAt, &updatedAt); err != nil {
 			return mempher.AppendResult{}, fmt.Errorf("mempher/postgres: append: scan: %w", err)
 		}
-		if !seen {
-			result.Episode.ID = mempher.EpisodeID(episodeID)
-			result.Episode.Seq = seq
-			seen = true
-		}
-		if jobID == nil {
+
+		// Episode rows come first, ordered by seq, which is the order the
+		// caller gave. Job rows have no seq.
+		if seq != nil {
+			ep := cmd.Episodes[len(result.Episodes)]
+			result.Episodes = append(result.Episodes, mempher.Episode{
+				ID:         mempher.EpisodeID(*episodeID),
+				Scope:      ep.Scope,
+				Seq:        *seq,
+				Content:    ep.Content,
+				Role:       ep.Role,
+				Actor:      ep.Actor,
+				Source:     ep.Source,
+				OccurredAt: ep.OccurredAt.UTC(),
+				IngestedAt: ep.IngestedAt.UTC(),
+				Binding:    ep.Binding.Clone(),
+			})
+			ids = append(ids, mempher.EpisodeID(*episodeID))
 			continue
 		}
 		result.Jobs = append(result.Jobs, mempher.Job{
-			ID:          mempher.JobID(*jobID),
+			ID:          mempher.JobID(deref(jobID)),
 			Kind:        mempher.JobKind(deref(jobKind)),
-			Scope:       ep.Scope,
-			Episodes:    []mempher.EpisodeID{mempher.EpisodeID(episodeID)},
+			Scope:       cmd.Episodes[0].Scope,
+			Episodes:    ids,
 			State:       mempher.JobState(deref(jobState)),
 			Attempts:    int(deref(attempts)),
 			MaxAttempts: int(deref(jobMaxTries)),
@@ -150,11 +194,12 @@ func (s *Store) Append(ctx context.Context, cmd mempher.AppendCommand) (mempher.
 		})
 	}
 	if err := rows.Err(); err != nil {
-		return mempher.AppendResult{}, wrapAppendError(err, ep)
+		return mempher.AppendResult{}, wrapAppendError(err, cmd.Episodes[0])
 	}
-	if !seen {
+	if len(result.Episodes) != n {
 		return mempher.AppendResult{}, fmt.Errorf(
-			"mempher/postgres: append: the insert returned no row, which should be impossible")
+			"mempher/postgres: append: the insert returned %d of %d episodes, "+
+				"which should be impossible", len(result.Episodes), n)
 	}
 	return result, nil
 }
@@ -276,24 +321,35 @@ func scanEpisode(row scanner) (mempher.Episode, error) {
 // validateAppend rejects a command the schema would reject anyway, so the error
 // names the field instead of quoting a constraint.
 func validateAppend(cmd mempher.AppendCommand) error {
-	ep := cmd.Episode
-
-	// The caller-facing rules live in one place; borrow them.
-	probe := mempher.AppendRequest{
-		Scope:   ep.Scope,
-		Content: ep.Content,
-		Role:    ep.Role,
-		Actor:   ep.Actor,
-		Source:  ep.Source,
-		Binding: ep.Binding,
+	if len(cmd.Episodes) == 0 {
+		return fmt.Errorf("a command must name at least one episode: %w",
+			mempher.ErrInvalidConfig)
 	}
-	if err := probe.Validate(); err != nil {
-		return fmt.Errorf("episode: %w", err)
-	}
-	if ep.OccurredAt.IsZero() || ep.IngestedAt.IsZero() {
-		return fmt.Errorf(
-			"OccurredAt and IngestedAt must be resolved by the caller, "+
-				"because a Store never reads a clock: %w", mempher.ErrInvalidConfig)
+	scope := cmd.Episodes[0].Scope
+	for i, ep := range cmd.Episodes {
+		// The caller-facing rules live in one place; borrow them.
+		probe := mempher.AppendRequest{
+			Scope:   ep.Scope,
+			Content: ep.Content,
+			Role:    ep.Role,
+			Actor:   ep.Actor,
+			Source:  ep.Source,
+			Binding: ep.Binding,
+		}
+		if err := probe.Validate(); err != nil {
+			return fmt.Errorf("episode %d: %w", i, err)
+		}
+		if ep.OccurredAt.IsZero() || ep.IngestedAt.IsZero() {
+			return fmt.Errorf(
+				"episode %d: OccurredAt and IngestedAt must be resolved by the caller, "+
+					"because a Store never reads a clock: %w", i, mempher.ErrInvalidConfig)
+		}
+		// Sequencing takes one scope's row, so a command is one scope.
+		if ep.Scope != scope {
+			return fmt.Errorf(
+				"episode %d names scope %q, not %q: one command is one scope: %w",
+				i, ep.Scope, scope, mempher.ErrInvalidConfig)
+		}
 	}
 
 	kinds := make(map[mempher.JobKind]struct{}, len(cmd.Jobs))

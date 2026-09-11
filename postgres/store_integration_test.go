@@ -34,7 +34,7 @@ func migrated(t *testing.T) (*postgres.Store, *pgxpool.Pool) {
 // episode builds a valid command with one encode job, as Memory.Append will.
 func episode(scope mempher.ScopeID, content string, at time.Time) mempher.AppendCommand {
 	return mempher.AppendCommand{
-		Episode: mempher.NewEpisode{
+		Episodes: []mempher.NewEpisode{{
 			Scope:      scope,
 			Content:    content,
 			Role:       mempher.RoleUser,
@@ -43,7 +43,7 @@ func episode(scope mempher.ScopeID, content string, at time.Time) mempher.Append
 			OccurredAt: at,
 			IngestedAt: at,
 			Binding:    mempher.Binding{"session": "s-42"},
-		},
+		}},
 		Jobs: []mempher.NewJob{{Kind: mempher.JobKindEncode, Scope: scope}},
 	}
 }
@@ -124,16 +124,16 @@ func TestAppend(t *testing.T) {
 
 	t.Run("the episode comes back with what the database assigned", func(t *testing.T) {
 		switch {
-		case got.Episode.ID.IsZero():
+		case got.Episodes[0].ID.IsZero():
 			t.Error("no episode id was returned")
-		case got.Episode.Seq != 1:
-			t.Errorf("Seq = %d, want 1", got.Episode.Seq)
-		case got.Episode.Content != "I am allergic to hazelnuts.":
-			t.Errorf("Content = %q", got.Episode.Content)
-		case got.Episode.Role != mempher.RoleUser:
-			t.Errorf("Role = %q", got.Episode.Role)
-		case !got.Episode.IngestedAt.Equal(epoch):
-			t.Errorf("IngestedAt = %s, want %s", got.Episode.IngestedAt, epoch)
+		case got.Episodes[0].Seq != 1:
+			t.Errorf("Seq = %d, want 1", got.Episodes[0].Seq)
+		case got.Episodes[0].Content != "I am allergic to hazelnuts.":
+			t.Errorf("Content = %q", got.Episodes[0].Content)
+		case got.Episodes[0].Role != mempher.RoleUser:
+			t.Errorf("Role = %q", got.Episodes[0].Role)
+		case !got.Episodes[0].IngestedAt.Equal(epoch):
+			t.Errorf("IngestedAt = %s, want %s", got.Episodes[0].IngestedAt, epoch)
 		}
 	})
 
@@ -153,7 +153,7 @@ func TestAppend(t *testing.T) {
 			t.Errorf("Attempts = %d, want 0", job.Attempts)
 		case job.MaxAttempts != mempher.DefaultMaxAttempts:
 			t.Errorf("MaxAttempts = %d, want %d", job.MaxAttempts, mempher.DefaultMaxAttempts)
-		case len(job.Episodes) != 1 || job.Episodes[0] != got.Episode.ID:
+		case len(job.Episodes) != 1 || job.Episodes[0] != got.Episodes[0].ID:
 			t.Errorf("job names %v, want the appended episode", job.Episodes)
 		case !job.RunAfter.Equal(epoch):
 			t.Errorf("RunAfter = %s, want %s", job.RunAfter, epoch)
@@ -161,14 +161,14 @@ func TestAppend(t *testing.T) {
 	})
 
 	t.Run("reading it back matches what Append reported", func(t *testing.T) {
-		read, err := store.Episode(ctx, "user:1", got.Episode.ID)
+		read, err := store.Episode(ctx, "user:1", got.Episodes[0].ID)
 		if err != nil {
 			t.Fatalf("Episode: %v", err)
 		}
-		if read.ID != got.Episode.ID || read.Seq != got.Episode.Seq ||
-			read.Content != got.Episode.Content || read.Role != got.Episode.Role ||
-			read.Actor != got.Episode.Actor || read.Source != got.Episode.Source {
-			t.Errorf("read back %+v, want %+v", read, got.Episode)
+		if read.ID != got.Episodes[0].ID || read.Seq != got.Episodes[0].Seq ||
+			read.Content != got.Episodes[0].Content || read.Role != got.Episodes[0].Role ||
+			read.Actor != got.Episodes[0].Actor || read.Source != got.Episodes[0].Source {
+			t.Errorf("read back %+v, want %+v", read, got.Episodes[0])
 		}
 		if !read.OccurredAt.Equal(epoch) || !read.IngestedAt.Equal(epoch) {
 			t.Errorf("timestamps = %s / %s, want %s", read.OccurredAt, read.IngestedAt, epoch)
@@ -183,7 +183,7 @@ func TestAppend(t *testing.T) {
 		// deliberately not the injected clock's epoch.
 		var extracted time.Time
 		if err := pool.QueryRow(ctx,
-			"SELECT uuid_extract_timestamp($1::uuid)", got.Episode.ID.String()).
+			"SELECT uuid_extract_timestamp($1::uuid)", got.Episodes[0].ID.String()).
 			Scan(&extracted); err != nil {
 			t.Fatalf("uuid_extract_timestamp: %v", err)
 		}
@@ -210,10 +210,10 @@ func TestAppendAllocatesDenseSequences(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Append %d: %v", i, err)
 		}
-		if want := int64(i + 1); got.Episode.Seq != want {
-			t.Errorf("episode %d has Seq %d, want %d", i, got.Episode.Seq, want)
+		if want := int64(i + 1); got.Episodes[0].Seq != want {
+			t.Errorf("episode %d has Seq %d, want %d", i, got.Episodes[0].Seq, want)
 		}
-		ids = append(ids, got.Episode.ID)
+		ids = append(ids, got.Episodes[0].ID)
 	}
 
 	// A second scope starts again at 1: sequences are per scope.
@@ -221,8 +221,8 @@ func TestAppendAllocatesDenseSequences(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Append to second scope: %v", err)
 	}
-	if other.Episode.Seq != 1 {
-		t.Errorf("second scope starts at Seq %d, want 1", other.Episode.Seq)
+	if other.Episodes[0].Seq != 1 {
+		t.Errorf("second scope starts at Seq %d, want 1", other.Episodes[0].Seq)
 	}
 
 	replayed, err := store.Replay(ctx, "user:1", 0, 100)
@@ -257,7 +257,7 @@ func TestAppendIsScopeIsolated(t *testing.T) {
 
 	// Asking for a real episode from the wrong scope is absence, not a
 	// permission error: scope isolation must not be probeable.
-	_, err = store.Episode(ctx, "user:2", mine.Episode.ID)
+	_, err = store.Episode(ctx, "user:2", mine.Episodes[0].ID)
 	if !errors.Is(err, mempher.ErrNotFound) {
 		t.Errorf("cross-scope read err = %v, want mempher.ErrNotFound", err)
 	}
@@ -282,32 +282,32 @@ func TestAppendRejectsBadCommands(t *testing.T) {
 	}{
 		{
 			name:    "no scope",
-			mutate:  func(c *mempher.AppendCommand) { c.Episode.Scope = "" },
+			mutate:  func(c *mempher.AppendCommand) { c.Episodes[0].Scope = "" },
 			wantErr: mempher.ErrInvalidScope,
 		},
 		{
 			name:    "no content",
-			mutate:  func(c *mempher.AppendCommand) { c.Episode.Content = "" },
+			mutate:  func(c *mempher.AppendCommand) { c.Episodes[0].Content = "" },
 			wantErr: mempher.ErrInvalidContent,
 		},
 		{
 			name:    "no role",
-			mutate:  func(c *mempher.AppendCommand) { c.Episode.Role = "" },
+			mutate:  func(c *mempher.AppendCommand) { c.Episodes[0].Role = "" },
 			wantErr: mempher.ErrInvalidRole,
 		},
 		{
 			name:    "no source",
-			mutate:  func(c *mempher.AppendCommand) { c.Episode.Source = "" },
+			mutate:  func(c *mempher.AppendCommand) { c.Episodes[0].Source = "" },
 			wantErr: mempher.ErrInvalidSource,
 		},
 		{
 			name:    "unresolved ingest time",
-			mutate:  func(c *mempher.AppendCommand) { c.Episode.IngestedAt = time.Time{} },
+			mutate:  func(c *mempher.AppendCommand) { c.Episodes[0].IngestedAt = time.Time{} },
 			wantErr: mempher.ErrInvalidConfig,
 		},
 		{
 			name:    "unresolved event time",
-			mutate:  func(c *mempher.AppendCommand) { c.Episode.OccurredAt = time.Time{} },
+			mutate:  func(c *mempher.AppendCommand) { c.Episodes[0].OccurredAt = time.Time{} },
 			wantErr: mempher.ErrInvalidConfig,
 		},
 		{
@@ -334,7 +334,7 @@ func TestAppendRejectsBadCommands(t *testing.T) {
 		{
 			name: "over-long content",
 			mutate: func(c *mempher.AppendCommand) {
-				c.Episode.Content = strings.Repeat("x", mempher.MaxContentLen+1)
+				c.Episodes[0].Content = strings.Repeat("x", mempher.MaxContentLen+1)
 			},
 			wantErr: mempher.ErrInvalidContent,
 		},
@@ -364,8 +364,8 @@ func TestAppendWithoutJobs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Append: %v", err)
 	}
-	if got.Episode.ID.IsZero() || got.Episode.Seq != 1 {
-		t.Errorf("episode = %+v, want an id and Seq 1", got.Episode)
+	if got.Episodes[0].ID.IsZero() || got.Episodes[0].Seq != 1 {
+		t.Errorf("episode = %+v, want an id and Seq 1", got.Episodes[0])
 	}
 	if len(got.Jobs) != 0 {
 		t.Errorf("got %d jobs, want none", len(got.Jobs))
@@ -379,13 +379,13 @@ func TestAppendWithNilBinding(t *testing.T) {
 	store, _ := migrated(t)
 
 	cmd := episode("user:1", "no binding", epoch)
-	cmd.Episode.Binding = nil
+	cmd.Episodes[0].Binding = nil
 
 	got, err := store.Append(t.Context(), cmd)
 	if err != nil {
 		t.Fatalf("Append: %v", err)
 	}
-	read, err := store.Episode(t.Context(), "user:1", got.Episode.ID)
+	read, err := store.Episode(t.Context(), "user:1", got.Episodes[0].ID)
 	if err != nil {
 		t.Fatalf("Episode: %v", err)
 	}

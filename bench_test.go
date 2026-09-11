@@ -116,6 +116,36 @@ func BenchmarkAppend(b *testing.B) {
 	}
 }
 
+// BenchmarkAppendBatch measures what a round trip and a commit cost when they
+// are shared. The per-episode number is what to compare against BenchmarkAppend.
+func BenchmarkAppendBatch(b *testing.B) {
+	for _, size := range []int{8, 32, 64} {
+		b.Run(fmt.Sprintf("size=%d", size), func(b *testing.B) {
+			f := newBenchFixture(b, nil)
+			ctx := b.Context()
+
+			reqs := make([]mempher.AppendRequest, size)
+			b.ReportAllocs()
+			for i := 0; b.Loop(); i++ {
+				for j := range reqs {
+					reqs[j] = mempher.AppendRequest{
+						Scope:   "bench",
+						Content: benchContent(i*size + j),
+						Role:    mempher.RoleUser,
+						Source:  "bench",
+						Binding: mempher.Binding{"session": "s-1"},
+					}
+				}
+				if _, err := f.memory.AppendBatch(ctx, reqs); err != nil {
+					b.Fatalf("AppendBatch: %v", err)
+				}
+			}
+			// Per episode, which is the number worth comparing.
+			b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N*size), "ns/episode")
+		})
+	}
+}
+
 // BenchmarkRecall measures the read loop over a fully encoded scope: embed the
 // query, run every channel at once, fuse, budget.
 func BenchmarkRecall(b *testing.B) {

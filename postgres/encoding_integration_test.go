@@ -44,7 +44,7 @@ func TestPutEncoding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Append: %v", err)
 	}
-	id := appended.Episode.ID
+	id := appended.Episodes[0].ID
 
 	if err := store.PutEncoding(ctx, encoding(id, vec(0.5))); err != nil {
 		t.Fatalf("PutEncoding: %v", err)
@@ -134,7 +134,7 @@ func TestPutEncodingRejectsBadInput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Append: %v", err)
 	}
-	id := appended.Episode.ID
+	id := appended.Episodes[0].ID
 
 	nan := vec(0)
 	nan[2] = float32(math.NaN())
@@ -247,7 +247,7 @@ func TestPutEncodingWithExtensionsElsewhere(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Append: %v", err)
 	}
-	if err := store.PutEncoding(ctx, encoding(appended.Episode.ID, vec(1))); err != nil {
+	if err := store.PutEncoding(ctx, encoding(appended.Episodes[0].ID, vec(1))); err != nil {
 		t.Fatalf("PutEncoding with pgvector outside the search_path: %v", err)
 	}
 }
@@ -263,7 +263,7 @@ func TestPendingEncodings(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Append: %v", err)
 		}
-		ids = append(ids, got.Episode.ID)
+		ids = append(ids, got.Episodes[0].ID)
 	}
 	otherScope, err := store.Append(ctx, episode("user:2", "elsewhere", epoch))
 	if err != nil {
@@ -316,8 +316,8 @@ func TestPendingEncodings(t *testing.T) {
 		if err != nil {
 			t.Fatalf("PendingEncodings: %v", err)
 		}
-		if len(pending) != 1 || pending[0] != otherScope.Episode.ID {
-			t.Errorf("scope user:2 pending = %v, want [%s]", pending, otherScope.Episode.ID)
+		if len(pending) != 1 || pending[0] != otherScope.Episodes[0].ID {
+			t.Errorf("scope user:2 pending = %v, want [%s]", pending, otherScope.Episodes[0].ID)
 		}
 	})
 

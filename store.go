@@ -24,8 +24,9 @@ import "context"
 // scope catalogue, and the anti-join saying what work is outstanding -- is
 // declared in the ops subpackage instead, and satisfied by the same type.
 type Store interface {
-	// Append inserts one episode and the jobs it implies, atomically,
-	// creating the scope if this is its first episode.
+	// Append inserts one or more episodes and the jobs they imply,
+	// atomically, creating the scope if this is its first episode. The
+	// episodes are sequenced in the order given.
 	Append(ctx context.Context, cmd AppendCommand) (AppendResult, error)
 
 	// Episode returns one episode by id within a scope, or [ErrNotFound].

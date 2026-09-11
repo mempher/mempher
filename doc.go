@@ -12,8 +12,11 @@
 //
 // # Three loops
 //
-// Write is the hot path: validate, insert one episode, enqueue the work it
-// implies, return. No model calls.
+// Write is the hot path: validate, insert, enqueue the work it implies, return.
+// No model calls. [Memory.AppendBatch] is the same loop for several episodes of
+// one scope at once: they take a contiguous block of sequence numbers under one
+// lock, share one round trip and one commit, and imply one job per kind rather
+// than one per episode -- so the consolidation that follows is batched too.
 //
 // Consolidate is offline, batched, idempotent and replayable, and every model
 // call lives there. See [Worker].

@@ -29,7 +29,7 @@ func seedEpisode(t *testing.T, store *postgres.Store, scope mempher.ScopeID, con
 	if err != nil {
 		t.Fatalf("Append %q: %v", content, err)
 	}
-	return result.Episode.ID
+	return result.Episodes[0].ID
 }
 
 // lives builds the claim the supersession tests move through time.

@@ -153,6 +153,10 @@ _, err = mem.Append(ctx, mempher.AppendRequest{
 	Binding: mempher.Binding{"session": "s-42"},
 })
 
+// A turn that produced several episodes goes in one round trip -- and becomes
+// one encode job, so the worker embeds the whole turn in one model call.
+_, err = mem.AppendBatch(ctx, []mempher.AppendRequest{question, toolCall, answer})
+
 // Read: fused, filtered, budgeted, with provenance on every hit.
 rec, err := mem.Recall(ctx, mempher.RecallRequest{
 	Scope:     "user:8123",
@@ -255,16 +259,25 @@ and replay" a real repair rather than a slogan.
 Against PostgreSQL 18 in a container on a developer laptop, over a scope of 1,000
 episodes, with a microsecond-cost embedder so the numbers are mempher's own:
 
-| | per operation |
-| --- | --- |
-| `Append` | **0.59 ms** — one round trip, no model call |
-| `Recall`, all channels | **4.1 ms** |
-| `Recall`, semantic only | 2.5 ms |
-| `Recall`, lexical only | 1.1 ms |
-| `Recall`, with L1 facts | 4.3 ms |
+| | per operation | per episode |
+| --- | --- | --- |
+| `Append` | **~0.45 ms** — one round trip, no model call | 0.45 ms |
+| `AppendBatch`, 8 | 1.2 ms | 0.16 ms |
+| `AppendBatch`, 32 | 2.2 ms | 0.07 ms |
+| `AppendBatch`, 64 | 3.3 ms | **0.05 ms** |
+| `Recall`, all channels | **4.1 ms** | |
+| `Recall`, semantic only | 2.5 ms | |
+| `Recall`, lexical only | 1.1 ms | |
+| `Recall`, with L1 facts | 4.3 ms | |
 
-Your own embedder adds its latency to `Recall` and *nothing at all* to `Append` —
-that is the reason the write path makes no model call. Reproduce with
+A single durable append is mostly one WAL fsync, so it has a floor that no amount
+of Go will move. Batching is what goes under it: one round trip and one commit
+shared by the whole batch takes an episode from 0.45 ms to 0.05 ms, nine times
+cheaper — and the saving compounds, because the batch is also one encode job and
+therefore one embedding call instead of sixty-four.
+
+Your own embedder adds its latency to `Recall` and *nothing at all* to either
+append — that is the reason the write path makes no model call. Reproduce with
 `make bench`.
 
 ## Requirements

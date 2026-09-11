@@ -25,11 +25,11 @@ func seed(
 		t.Fatalf("Append %q: %v", content, err)
 	}
 	if v != nil {
-		if err := store.PutEncoding(t.Context(), encoding(got.Episode.ID, v)); err != nil {
+		if err := store.PutEncoding(t.Context(), encoding(got.Episodes[0].ID, v)); err != nil {
 			t.Fatalf("PutEncoding %q: %v", content, err)
 		}
 	}
-	return got.Episode.ID
+	return got.Episodes[0].ID
 }
 
 // unit builds a unit vector pointing along one axis, so cosine distances between
@@ -183,7 +183,7 @@ func TestSearchSemanticRespectsFilters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Append: %v", err)
 	}
-	if err := store.PutEncoding(ctx, encoding(future.Episode.ID, unit(0))); err != nil {
+	if err := store.PutEncoding(ctx, encoding(future.Episodes[0].ID, unit(0))); err != nil {
 		t.Fatalf("PutEncoding: %v", err)
 	}
 
@@ -316,23 +316,23 @@ func TestSearchSharedFilters(t *testing.T) {
 
 	// Two episodes differing in event time, role and binding.
 	early := episode("user:1", "hazelnut early", epoch)
-	early.Episode.OccurredAt = epoch
-	early.Episode.Role = mempher.RoleUser
-	early.Episode.Binding = mempher.Binding{"session": "a"}
+	early.Episodes[0].OccurredAt = epoch
+	early.Episodes[0].Role = mempher.RoleUser
+	early.Episodes[0].Binding = mempher.Binding{"session": "a"}
 	first, err := store.Append(ctx, early)
 	if err != nil {
 		t.Fatalf("Append: %v", err)
 	}
 
 	late := episode("user:1", "hazelnut late", epoch)
-	late.Episode.OccurredAt = epoch.Add(48 * time.Hour)
-	late.Episode.Role = mempher.RoleAssistant
-	late.Episode.Binding = mempher.Binding{"session": "b"}
+	late.Episodes[0].OccurredAt = epoch.Add(48 * time.Hour)
+	late.Episodes[0].Role = mempher.RoleAssistant
+	late.Episodes[0].Binding = mempher.Binding{"session": "b"}
 	second, err := store.Append(ctx, late)
 	if err != nil {
 		t.Fatalf("Append: %v", err)
 	}
-	for _, id := range []mempher.EpisodeID{first.Episode.ID, second.Episode.ID} {
+	for _, id := range []mempher.EpisodeID{first.Episodes[0].ID, second.Episodes[0].ID} {
 		if err := store.PutEncoding(ctx, encoding(id, unit(0))); err != nil {
 			t.Fatalf("PutEncoding: %v", err)
 		}
