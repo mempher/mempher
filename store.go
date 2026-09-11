@@ -19,6 +19,10 @@ import "context"
 // Retrieval is split per channel rather than exposed as one fused query so that
 // [Memory.Recall] can run the channels concurrently and gain a channel later
 // without rewriting a single large statement.
+//
+// What a Store needs for operating a deployment rather than serving it -- the
+// scope catalogue, and the anti-join saying what work is outstanding -- is
+// declared in the ops subpackage instead, and satisfied by the same type.
 type Store interface {
 	// Append inserts one episode and the jobs it implies, atomically,
 	// creating the scope if this is its first episode.
@@ -43,18 +47,6 @@ type Store interface {
 	// It fills the encoding's scope and ingest time from the episode row, and
 	// returns [ErrNotFound] if that episode does not exist.
 	PutEncoding(ctx context.Context, enc Encoding) error
-
-	// PendingEncodings returns ids of episodes with no encoding for a model,
-	// in Seq order.
-	PendingEncodings(ctx context.Context, q PendingEncodings) ([]EpisodeID, error)
-
-	// Scopes lists the partitions of L0 in id order, so that work spanning
-	// all of them can be walked one scope at a time.
-	//
-	// It is the catalogue every other method assumes: Seq is only ordered
-	// within a scope, so paging through the whole log means paging through
-	// each scope in turn, and nothing else can say what the scopes are.
-	Scopes(ctx context.Context, q ScopeQuery) ([]Scope, error)
 
 	// Forget erases episodes and every row this store holds that derives
 	// from them, and reports what went.

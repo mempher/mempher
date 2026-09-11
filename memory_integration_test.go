@@ -12,6 +12,7 @@ import (
 	"github.com/mempher/mempher"
 	"github.com/mempher/mempher/internal/pgtest"
 	"github.com/mempher/mempher/memphertest"
+	"github.com/mempher/mempher/ops"
 	"github.com/mempher/mempher/postgres"
 )
 
@@ -421,7 +422,7 @@ func TestWorkerRetriesThenGivesUp(t *testing.T) {
 	}
 
 	// The job is pending again, with its retry pushed into the future.
-	pending, err := f.store.PendingEncodings(ctx, mempher.PendingEncodings{
+	pending, err := f.store.PendingEncodings(ctx, ops.PendingEncodings{
 		Model: f.embedder.Model(),
 	})
 	if err != nil {
@@ -442,7 +443,7 @@ func TestWorkerRetriesThenGivesUp(t *testing.T) {
 	if done := f.drain(t); done != 1 {
 		t.Errorf("drained %d jobs after recovery, want 1", done)
 	}
-	pending, err = f.store.PendingEncodings(ctx, mempher.PendingEncodings{
+	pending, err = f.store.PendingEncodings(ctx, ops.PendingEncodings{
 		Model: f.embedder.Model(),
 	})
 	if err != nil {
@@ -480,7 +481,7 @@ func TestWorkerRunStopsOnCancellation(t *testing.T) {
 		default:
 		}
 
-		pending, err := f.store.PendingEncodings(t.Context(), mempher.PendingEncodings{
+		pending, err := f.store.PendingEncodings(t.Context(), ops.PendingEncodings{
 			Model: f.embedder.Model(),
 		})
 		if err != nil {
@@ -531,7 +532,7 @@ func TestProjectionsRebuildFromL0(t *testing.T) {
 
 	// The queue is a projection of L0 too: ask which episodes lack an encoding
 	// and queue them.
-	pending, err := f.store.PendingEncodings(ctx, mempher.PendingEncodings{Model: f.embedder.Model()})
+	pending, err := f.store.PendingEncodings(ctx, ops.PendingEncodings{Model: f.embedder.Model()})
 	if err != nil {
 		t.Fatalf("PendingEncodings: %v", err)
 	}

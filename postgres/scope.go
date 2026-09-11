@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/mempher/mempher"
+	"github.com/mempher/mempher/ops"
 )
 
 // DefaultScopesLimit is how many scopes [Store.Scopes] returns when a query does
@@ -24,8 +24,8 @@ const scopeColumns = `id, last_seq, created_at`
 // of a log is read, never counted.
 func (s *Store) Scopes(
 	ctx context.Context,
-	q mempher.ScopeQuery,
-) ([]mempher.Scope, error) {
+	q ops.ScopeQuery,
+) ([]ops.Scope, error) {
 	if err := q.Validate(); err != nil {
 		return nil, fmt.Errorf("mempher/postgres: scopes: %w", err)
 	}
@@ -58,7 +58,7 @@ func (s *Store) Scopes(
 	}
 	defer rows.Close()
 
-	out := make([]mempher.Scope, 0, min(limit, 128))
+	out := make([]ops.Scope, 0, min(limit, 128))
 	for rows.Next() {
 		scope, err := scanScope(rows)
 		if err != nil {
@@ -73,10 +73,10 @@ func (s *Store) Scopes(
 }
 
 // scanScope reads one scope in [scopeColumns] order.
-func scanScope(row scanner) (mempher.Scope, error) {
-	var scope mempher.Scope
+func scanScope(row scanner) (ops.Scope, error) {
+	var scope ops.Scope
 	if err := row.Scan(&scope.ID, &scope.LastSeq, &scope.CreatedAt); err != nil {
-		return mempher.Scope{}, fmt.Errorf("scan scope: %w", err)
+		return ops.Scope{}, fmt.Errorf("scan scope: %w", err)
 	}
 	scope.CreatedAt = scope.CreatedAt.UTC()
 	return scope, nil

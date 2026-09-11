@@ -1,12 +1,14 @@
 // Recovering the work L0 implies but the queue no longer holds.
 
-package mempher
+package ops
 
 import (
 	"context"
 	"fmt"
 	"slices"
 	"time"
+
+	"github.com/mempher/mempher"
 )
 
 // Backfill defaults, used when the corresponding [BackfillRequest] field is
@@ -20,7 +22,7 @@ const (
 	// little and large enough that a million episodes is not a million model
 	// calls.
 	DefaultBackfillBatch = 16
-	// DefaultBackfillLimit is how many episodes one [Worker.Backfill] call
+	// DefaultBackfillLimit is how many episodes one [Ops.Backfill] call
 	// enqueues work for, per kind, before returning its cursor.
 	DefaultBackfillLimit = 1000
 )
@@ -37,14 +39,14 @@ const (
 type BackfillRequest struct {
 	// Scope restricts the backfill to one partition. Empty walks every
 	// scope, in id order, which is what a change of model wants.
-	Scope ScopeID
-	// Kinds restricts what to enqueue. Empty means every kind this worker
-	// handles, which excludes [JobKindExtract] when it has no [Extractor].
+	Scope mempher.ScopeID
+	// Kinds restricts what to enqueue. Empty means every kind this Ops
+	// can enqueue, which excludes [JobKindExtract] when it has no [Extractor].
 	//
 	// The two kinds are worth separating here for the same reason they are
 	// separate kinds: a new embedding model reruns every encode and no
 	// extraction, and a fixed prompt reruns the reverse.
-	Kinds []JobKind
+	Kinds []mempher.JobKind
 	// AfterSeq resumes a paged backfill within one scope, and requires
 	// Scope, because Seq is only ordered inside one.
 	AfterSeq int64
@@ -82,7 +84,7 @@ type BackfillCount struct {
 	Collapsed int
 }
 
-// BackfillResult reports what a [Worker.Backfill] call enqueued, and where to
+// BackfillResult reports what a [Ops.Backfill] call enqueued, and where to
 // resume.
 //
 // Backfill enqueues work and never does it. It makes no model call, writes no
@@ -98,7 +100,7 @@ type BackfillResult struct {
 	// NextScope and NextSeq resume the walk: pass them back as
 	// [BackfillRequest.Scope] and [BackfillRequest.AfterSeq] to continue
 	// from where this call stopped. They are zero once Done.
-	NextScope ScopeID
+	NextScope mempher.ScopeID
 	NextSeq   int64
 	// Done reports that the walk reached the end of what the request asked
 	// for. It does not mean the queue is empty: the jobs this call enqueued
@@ -128,11 +130,11 @@ type BackfillResult struct {
 // [BackfillResult.Done], which keeps a backfill of ten million episodes
 // cancellable and keeps its cost visible between pages instead of inside one
 // call that does not return.
-func (w *Worker) Backfill(ctx context.Context, req BackfillRequest) (BackfillResult, error) {
+func (o *Ops) Backfill(ctx context.Context, req BackfillRequest) (BackfillResult, error) {
 	if err := req.Validate(); err != nil {
 		return BackfillResult{}, err
 	}
-	kinds, err := w.backfillKinds(req.Kinds)
+	kinds, err := o.backfillKinds(req.Kinds)
 	if err != nil {
 		return BackfillResult{}, err
 	}
@@ -148,7 +150,7 @@ func (w *Worker) Backfill(ctx context.Context, req BackfillRequest) (BackfillRes
 	// One instant for the whole call, because it is what Collapsed is measured
 	// against: two pages enqueued a millisecond apart would report the same job
 	// differently.
-	now := w.clock.Now()
+	now := o.clock.Now()
 
 	cursors := make([]*backfillCursor, len(kinds))
 	for i, kind := range kinds {
@@ -156,11 +158,11 @@ func (w *Worker) Backfill(ctx context.Context, req BackfillRequest) (BackfillRes
 	}
 
 	var out BackfillResult
-	after := ScopeID("")
+	after := mempher.ScopeID("")
 	for {
 		scopes := []Scope{{ID: req.Scope}}
 		if req.Scope == "" {
-			listed, err := w.store.Scopes(ctx, ScopeQuery{After: after, Limit: backfillScopePage})
+			listed, err := o.store.Scopes(ctx, ScopeQuery{After: after, Limit: backfillScopePage})
 			if err != nil {
 				return out, fmt.Errorf("mempher: backfill: list scopes: %w", err)
 			}
@@ -182,7 +184,7 @@ func (w *Worker) Backfill(ctx context.Context, req BackfillRequest) (BackfillRes
 				cursor.seq, cursor.exhausted = seed, false
 			}
 
-			if err := w.backfillScope(ctx, scope.ID, cursors, req, batch, now, &out); err != nil {
+			if err := o.backfillScope(ctx, scope.ID, cursors, req, batch, now, &out); err != nil {
 				return out, err
 			}
 			// A spent budget stops the whole walk rather than only the kind
@@ -208,7 +210,7 @@ const backfillScopePage = 100
 
 // backfillCursor is one kind's progress through one scope.
 type backfillCursor struct {
-	kind JobKind
+	kind mempher.JobKind
 	// seq is the last episode this kind has enqueued work for, within the
 	// scope being walked.
 	seq int64
@@ -220,9 +222,9 @@ type backfillCursor struct {
 }
 
 // backfillScope drains one scope until every kind is exhausted or out of budget.
-func (w *Worker) backfillScope(
+func (o *Ops) backfillScope(
 	ctx context.Context,
-	scope ScopeID,
+	scope mempher.ScopeID,
 	cursors []*backfillCursor,
 	req BackfillRequest,
 	batch int,
@@ -236,7 +238,7 @@ func (w *Worker) backfillScope(
 				continue
 			}
 
-			ids, err := w.pending(ctx, cursor.kind, scope, cursor.seq, cursor.remaining)
+			ids, err := o.pending(ctx, cursor.kind, scope, cursor.seq, cursor.remaining)
 			if err != nil {
 				return fmt.Errorf("mempher: backfill: pending %s work in scope %q: %w",
 					cursor.kind, scope, err)
@@ -246,7 +248,7 @@ func (w *Worker) backfillScope(
 				continue
 			}
 
-			jobs, collapsed, err := w.enqueueBatches(ctx, cursor.kind, scope, ids, batch, now, req.RunAfter)
+			jobs, collapsed, err := o.enqueueBatches(ctx, cursor.kind, scope, ids, batch, now, req.RunAfter)
 			// Counted before the error is returned, so a run that fails
 			// half way still reports the half it did.
 			count := out.countFor(cursor.kind)
@@ -261,7 +263,7 @@ func (w *Worker) backfillScope(
 			// the last episode of the page is read to place it. One extra
 			// round trip per page, against a page that has just become as
 			// many model calls.
-			last, err := w.store.Episode(ctx, scope, ids[len(ids)-1])
+			last, err := o.store.Episode(ctx, scope, ids[len(ids)-1])
 			if err != nil {
 				return fmt.Errorf("mempher: backfill: read episode %s: %w", ids[len(ids)-1], err)
 			}
@@ -276,45 +278,45 @@ func (w *Worker) backfillScope(
 }
 
 // pending asks what one kind has left to do in one scope.
-func (w *Worker) pending(
+func (o *Ops) pending(
 	ctx context.Context,
-	kind JobKind,
-	scope ScopeID,
+	kind mempher.JobKind,
+	scope mempher.ScopeID,
 	afterSeq int64,
 	limit int,
-) ([]EpisodeID, error) {
+) ([]mempher.EpisodeID, error) {
 	switch kind {
-	case JobKindEncode:
-		return w.store.PendingEncodings(ctx, PendingEncodings{
+	case mempher.JobKindEncode:
+		return o.store.PendingEncodings(ctx, PendingEncodings{
 			Scope:    scope,
-			Model:    w.embedder.Model(),
+			Model:    o.embedder.Model(),
 			AfterSeq: afterSeq,
 			Limit:    limit,
 		})
-	case JobKindExtract:
-		return w.facts.PendingExtractions(ctx, PendingExtractions{
+	case mempher.JobKindExtract:
+		return o.facts.PendingExtractions(ctx, PendingExtractions{
 			Scope:     scope,
-			Extractor: w.extractor.Model(),
+			Extractor: o.extractor.Model(),
 			AfterSeq:  afterSeq,
 			Limit:     limit,
 		})
 	default:
-		return nil, fmt.Errorf("kind %q: %w", kind, ErrInvalidJobKind)
+		return nil, fmt.Errorf("kind %q: %w", kind, mempher.ErrInvalidJobKind)
 	}
 }
 
 // enqueueBatches turns a page of pending episodes into jobs, and reports how
 // many of those jobs the queue already held.
-func (w *Worker) enqueueBatches(
+func (o *Ops) enqueueBatches(
 	ctx context.Context,
-	kind JobKind,
-	scope ScopeID,
-	ids []EpisodeID,
+	kind mempher.JobKind,
+	scope mempher.ScopeID,
+	ids []mempher.EpisodeID,
 	batch int,
 	now, runAfter time.Time,
 ) (jobs, collapsed int, err error) {
 	for start := 0; start < len(ids); start += batch {
-		job, err := w.queue.Enqueue(ctx, NewJob{
+		job, err := o.store.Enqueue(ctx, mempher.NewJob{
 			Kind:     kind,
 			Scope:    scope,
 			Episodes: slices.Clone(ids[start:min(start+batch, len(ids))]),
@@ -336,16 +338,16 @@ func (w *Worker) enqueueBatches(
 // backfillKinds resolves what to enqueue, rejecting work this worker could not
 // drain. A worker with no [Extractor] cannot backfill extractions for the same
 // reason it does not claim them: nothing would name the facts.
-func (w *Worker) backfillKinds(requested []JobKind) ([]JobKind, error) {
+func (o *Ops) backfillKinds(requested []mempher.JobKind) ([]mempher.JobKind, error) {
 	if len(requested) == 0 {
-		return w.kinds, nil
+		return o.kinds, nil
 	}
-	out := make([]JobKind, 0, len(requested))
+	out := make([]mempher.JobKind, 0, len(requested))
 	for _, kind := range requested {
-		if !slices.Contains(w.kinds, kind) {
+		if !slices.Contains(o.kinds, kind) {
 			return nil, fmt.Errorf(
 				"mempher: backfill: this worker handles %v, not %s jobs: %w",
-				w.kinds, kind, ErrInvalidConfig)
+				o.kinds, kind, mempher.ErrInvalidConfig)
 		}
 		if !slices.Contains(out, kind) {
 			out = append(out, kind)
@@ -355,8 +357,8 @@ func (w *Worker) backfillKinds(requested []JobKind) ([]JobKind, error) {
 }
 
 // countFor is where one kind's tally lives.
-func (r *BackfillResult) countFor(kind JobKind) *BackfillCount {
-	if kind == JobKindExtract {
+func (r *BackfillResult) countFor(kind mempher.JobKind) *BackfillCount {
+	if kind == mempher.JobKindExtract {
 		return &r.Extract
 	}
 	return &r.Encode

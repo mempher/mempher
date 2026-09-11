@@ -39,19 +39,10 @@
 //
 // # Operating it
 //
-// A projection is disposable, so the library has to be able to rebuild one.
-// [Worker.Backfill] asks L0 what work it implies -- episodes with no encoding
-// for the configured [Embedder], episodes no [Extractor] has read -- and
-// enqueues whatever the queue is missing. It answers from the projection tables
-// rather than from the queue's own history, so it recovers a job that died, a
-// scope that predates the extractor, and a model or prompt that has since
-// changed, without knowing which of the three happened.
-//
-// The queue can also be read and pruned: [Queue.Jobs] lists work by scope, kind
-// and state, [Queue.Stats] reports each bucket's depth and age, [Queue.Retry]
-// revives a dead job once its cause has been dealt with, and [Queue.Purge]
-// deletes finished rows. [Store.Scopes] lists the partitions of L0, which is how
-// work spanning all of them is walked.
+// Everything needed to run a deployment, and nothing needed to use one, lives in
+// the ops subpackage: backfilling the work L0 implies but the queue has lost,
+// reading and pruning the job queue, and walking the catalogue of scopes. It is
+// a separate package so that this one stays the concept.
 //
 // # Forgetting
 //

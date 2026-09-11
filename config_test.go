@@ -31,12 +31,6 @@ func (storeOnly) SearchLexical(context.Context, LexicalQuery) ([]Candidate, erro
 	return nil, errTestDouble
 }
 func (storeOnly) PutEncoding(context.Context, Encoding) error { return errTestDouble }
-func (storeOnly) PendingEncodings(context.Context, PendingEncodings) ([]EpisodeID, error) {
-	return nil, errTestDouble
-}
-func (storeOnly) Scopes(context.Context, ScopeQuery) ([]Scope, error) {
-	return nil, errTestDouble
-}
 func (storeOnly) Forget(context.Context, ForgetRequest) (ForgetResult, error) {
 	return ForgetResult{}, errTestDouble
 }
@@ -59,18 +53,6 @@ func (storeAndQueue) Fail(context.Context, JobID, WorkerID, error, time.Time, ti
 }
 func (storeAndQueue) Reclaim(context.Context, time.Time) (int, error) { return 0, errTestDouble }
 func (storeAndQueue) Job(context.Context, JobID) (Job, error)         { return Job{}, errTestDouble }
-func (storeAndQueue) Jobs(context.Context, JobQuery) ([]Job, error) {
-	return nil, errTestDouble
-}
-func (storeAndQueue) Stats(context.Context, ScopeID) ([]JobCount, error) {
-	return nil, errTestDouble
-}
-func (storeAndQueue) Retry(context.Context, JobID, time.Time) (Job, error) {
-	return Job{}, errTestDouble
-}
-func (storeAndQueue) Purge(context.Context, PurgeRequest) (int, error) {
-	return 0, errTestDouble
-}
 
 var (
 	_ Store = storeOnly{}

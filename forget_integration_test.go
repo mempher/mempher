@@ -6,6 +6,7 @@ import (
 
 	"github.com/mempher/mempher"
 	"github.com/mempher/mempher/memphertest"
+	"github.com/mempher/mempher/ops"
 )
 
 // Erasure through the public API, against a real PostgreSQL 18. It is the one
@@ -97,7 +98,7 @@ func TestForgetErasesAScopeCompletely(t *testing.T) {
 	}
 
 	// And the scope is gone from the catalogue, so a walk no longer visits it.
-	scopes, err := f.store.Scopes(ctx, mempher.ScopeQuery{})
+	scopes, err := f.store.Scopes(ctx, ops.ScopeQuery{})
 	if err != nil {
 		t.Fatalf("Scopes: %v", err)
 	}

@@ -287,23 +287,6 @@ type FactQuery struct {
 	Limit int
 }
 
-// PendingExtractions asks which episodes an extractor has not yet read.
-//
-// The answer is derived from L0 and the extraction markers alone, so it is the
-// safety net behind the queue: enqueue what it returns and any episode missed by
-// a lost job, or left behind by a change of extractor, gets read.
-type PendingExtractions struct {
-	// Scope restricts the search to one partition. Empty means all scopes,
-	// which is what a backfill wants.
-	Scope ScopeID
-	// Extractor is whose markers to look for. Required.
-	Extractor ExtractorID
-	// AfterSeq pages a large backfill within one scope. Requires Scope.
-	AfterSeq int64
-	// Limit is the most ids to return. Zero means a store-chosen default.
-	Limit int
-}
-
 // FactStore is the persistence port for L1. It is separate from [Store] for the
 // same reason [Queue] is: one backend normally serves all three, and the
 // postgres subpackage does, but a deployment that runs no [Extractor] stores no
@@ -333,8 +316,4 @@ type FactStore interface {
 
 	// Fact returns one fact by id within a scope, or [ErrNotFound].
 	Fact(ctx context.Context, scope ScopeID, id FactID) (Fact, error)
-
-	// PendingExtractions returns ids of episodes no extraction marker covers,
-	// in Seq order.
-	PendingExtractions(ctx context.Context, q PendingExtractions) ([]EpisodeID, error)
 }

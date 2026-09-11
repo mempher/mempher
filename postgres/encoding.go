@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/mempher/mempher"
+	"github.com/mempher/mempher/ops"
 )
 
 // DefaultPendingEncodingsLimit is how many ids [Store.PendingEncodings] returns
@@ -129,7 +130,7 @@ LIMIT $4`
 // order.
 func (s *Store) PendingEncodings(
 	ctx context.Context,
-	q mempher.PendingEncodings,
+	q ops.PendingEncodings,
 ) ([]mempher.EpisodeID, error) {
 	if q.Model == "" {
 		return nil, fmt.Errorf("mempher/postgres: pending encodings: model is empty: %w",

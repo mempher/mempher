@@ -8,12 +8,29 @@ import (
 
 	"github.com/mempher/mempher"
 	"github.com/mempher/mempher/memphertest"
+	"github.com/mempher/mempher/ops"
 )
 
 // Backfill through the public API, against a real PostgreSQL 18. What it is for
 // cannot be faked: every answer it gives is an anti-join between L0 and a
 // projection table, and a store that only pretended to hold them would be
 // answering its own question.
+
+// operator builds the ops handle these tests drive, over the fixture's own
+// store and clock. Everything it needs is what a deployment would give it.
+func (f *fixture) operator(t *testing.T, extractor mempher.Extractor) *ops.Ops {
+	t.Helper()
+	o, err := ops.New(ops.Config{
+		Store:     f.store,
+		Embedder:  f.embedder,
+		Extractor: extractor,
+		Clock:     f.clock,
+	})
+	if err != nil {
+		t.Fatalf("ops.New: %v", err)
+	}
+	return o
+}
 
 // countEncodings reports how many vectors exist, which is what a dropped
 // projection is measured by.
@@ -31,7 +48,7 @@ func (f *fixture) countEncodings(t *testing.T) int {
 // idempotence is checked without depending on a clock.
 func (f *fixture) countJobs(t *testing.T) int {
 	t.Helper()
-	jobs, err := f.store.Jobs(t.Context(), mempher.JobQuery{Limit: 1000})
+	jobs, err := f.store.Jobs(t.Context(), ops.JobQuery{Limit: 1000})
 	if err != nil {
 		t.Fatalf("Jobs: %v", err)
 	}
@@ -58,7 +75,7 @@ func TestBackfillRebuildsADroppedProjection(t *testing.T) {
 		t.Fatalf("truncate the encodings: %v", err)
 	}
 
-	result, err := f.worker.Backfill(ctx, mempher.BackfillRequest{})
+	result, err := f.operator(t, nil).Backfill(ctx, ops.BackfillRequest{})
 	if err != nil {
 		t.Fatalf("Backfill: %v", err)
 	}
@@ -114,7 +131,7 @@ func TestBackfillPicksUpAnExtractorConfiguredLater(t *testing.T) {
 		t.Fatalf("NewWorker: %v", err)
 	}
 
-	result, err := worker.Backfill(ctx, mempher.BackfillRequest{
+	result, err := f.operator(t, extractor).Backfill(ctx, ops.BackfillRequest{
 		Kinds: []mempher.JobKind{mempher.JobKindExtract},
 	})
 	if err != nil {
@@ -163,7 +180,7 @@ func TestBackfillIsIdempotent(t *testing.T) {
 	// sees exactly what the first did.
 	before := f.countJobs(t)
 
-	first, err := f.worker.Backfill(ctx, mempher.BackfillRequest{})
+	first, err := f.operator(t, nil).Backfill(ctx, ops.BackfillRequest{})
 	if err != nil {
 		t.Fatalf("Backfill: %v", err)
 	}
@@ -177,7 +194,7 @@ func TestBackfillIsIdempotent(t *testing.T) {
 
 	// A later call, so that "already existed" is distinguishable at all.
 	f.clock.Advance(time.Minute)
-	second, err := f.worker.Backfill(ctx, mempher.BackfillRequest{})
+	second, err := f.operator(t, nil).Backfill(ctx, ops.BackfillRequest{})
 	if err != nil {
 		t.Fatalf("Backfill: %v", err)
 	}
@@ -201,13 +218,13 @@ func TestBackfillPagesThroughALongScope(t *testing.T) {
 		f.append(t, "user:1", fmt.Sprintf("episode %d", i))
 	}
 
-	req := mempher.BackfillRequest{Limit: 3, BatchSize: 3}
+	req := ops.BackfillRequest{Limit: 3, BatchSize: 3}
 	seen := 0
 	for pages := 0; ; pages++ {
 		if pages > 5 {
 			t.Fatal("the walk did not finish in five pages")
 		}
-		result, err := f.worker.Backfill(ctx, req)
+		result, err := f.operator(t, nil).Backfill(ctx, req)
 		if err != nil {
 			t.Fatalf("Backfill: %v", err)
 		}
@@ -247,7 +264,7 @@ func TestBackfillWalksEveryScope(t *testing.T) {
 		t.Fatalf("truncate the encodings: %v", err)
 	}
 
-	result, err := f.worker.Backfill(ctx, mempher.BackfillRequest{})
+	result, err := f.operator(t, nil).Backfill(ctx, ops.BackfillRequest{})
 	if err != nil {
 		t.Fatalf("Backfill: %v", err)
 	}
@@ -278,7 +295,7 @@ func TestBackfillLimitsItsScope(t *testing.T) {
 	f.append(t, "user:1", "an episode")
 	f.append(t, "user:2", "an episode")
 
-	result, err := f.worker.Backfill(ctx, mempher.BackfillRequest{Scope: "user:1"})
+	result, err := f.operator(t, nil).Backfill(ctx, ops.BackfillRequest{Scope: "user:1"})
 	if err != nil {
 		t.Fatalf("Backfill: %v", err)
 	}
@@ -297,7 +314,7 @@ func TestBackfillFindsNothingWhenTheQueueIsCaughtUp(t *testing.T) {
 	f.append(t, "user:1", "an episode")
 	f.drain(t)
 
-	result, err := f.worker.Backfill(t.Context(), mempher.BackfillRequest{})
+	result, err := f.operator(t, nil).Backfill(t.Context(), ops.BackfillRequest{})
 	if err != nil {
 		t.Fatalf("Backfill: %v", err)
 	}
@@ -313,14 +330,14 @@ func TestBackfillRejectsWorkThisWorkerCannotDo(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
 
-	_, err := f.worker.Backfill(t.Context(), mempher.BackfillRequest{
+	_, err := f.operator(t, nil).Backfill(t.Context(), ops.BackfillRequest{
 		Kinds: []mempher.JobKind{mempher.JobKindExtract},
 	})
 	if !errors.Is(err, mempher.ErrInvalidConfig) {
 		t.Errorf("backfilling extractions with no Extractor err = %v, want mempher.ErrInvalidConfig", err)
 	}
 
-	if _, err := f.worker.Backfill(t.Context(), mempher.BackfillRequest{
+	if _, err := f.operator(t, nil).Backfill(t.Context(), ops.BackfillRequest{
 		AfterSeq: 4,
 	}); !errors.Is(err, mempher.ErrInvalidConfig) {
 		t.Errorf("AfterSeq with no Scope err = %v, want mempher.ErrInvalidConfig", err)

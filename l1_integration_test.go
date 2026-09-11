@@ -8,6 +8,7 @@ import (
 	"github.com/mempher/mempher"
 	"github.com/mempher/mempher/internal/pgtest"
 	"github.com/mempher/mempher/memphertest"
+	"github.com/mempher/mempher/ops"
 	"github.com/mempher/mempher/postgres"
 )
 
@@ -225,7 +226,7 @@ func TestExtractionIsIdempotentAcrossDrains(t *testing.T) {
 	f.drain(t)
 
 	// Put the work back as a lost job would be recovered, and run it again.
-	pending, err := f.store.PendingExtractions(t.Context(), mempher.PendingExtractions{
+	pending, err := f.store.PendingExtractions(t.Context(), ops.PendingExtractions{
 		Extractor: f.extractor.Model(), Scope: "user:1",
 	})
 	if err != nil {
@@ -295,7 +296,7 @@ func TestFactsRebuildFromL0(t *testing.T) {
 	}
 
 	// Rebuild it the way an operator would: ask what is missing, enqueue that.
-	pending, err := f.store.PendingExtractions(t.Context(), mempher.PendingExtractions{
+	pending, err := f.store.PendingExtractions(t.Context(), ops.PendingExtractions{
 		Extractor: f.extractor.Model(),
 	})
 	if err != nil {
@@ -431,7 +432,7 @@ func TestWorkerWithoutExtractorLeavesExtractJobsAlone(t *testing.T) {
 	}
 	// The extract job is untouched and still claimable, so the worker that can
 	// do it still will.
-	pending, err := f.store.PendingExtractions(t.Context(), mempher.PendingExtractions{
+	pending, err := f.store.PendingExtractions(t.Context(), ops.PendingExtractions{
 		Extractor: f.extractor.Model(),
 	})
 	if err != nil {

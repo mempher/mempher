@@ -1,8 +1,12 @@
 // The catalogue of L0 partitions.
 
-package mempher
+package ops
 
-import "time"
+import (
+	"time"
+
+	"github.com/mempher/mempher"
+)
 
 // Scope is one partition of L0 as the catalogue holds it: its identity, how far
 // its log has run, and when it was first written to.
@@ -12,12 +16,12 @@ import "time"
 // the only place the length of a log can be read without counting it.
 type Scope struct {
 	// ID is the partition key every episode, job and fact carries.
-	ID ScopeID
+	ID mempher.ScopeID
 	// LastSeq is the Seq of the newest episode in the scope, and therefore
 	// how many episodes it holds: Seq starts at 1 and is dense.
 	LastSeq int64
 	// CreatedAt is when the scope's first episode was appended, from the
-	// [Clock] of whoever appended it.
+	// [mempher.Clock] of whoever appended it.
 	CreatedAt time.Time
 }
 
@@ -31,10 +35,10 @@ type ScopeQuery struct {
 	// which is how a multi-tenant deployment lists one tenant's scopes. It
 	// is a filter and not a promise about indexes: whether it can seek the
 	// primary key depends on the database's collation.
-	Prefix ScopeID
+	Prefix mempher.ScopeID
 	// After pages the listing: only scopes ordered after it are returned.
 	// Empty starts at the beginning.
-	After ScopeID
+	After mempher.ScopeID
 	// Limit is the most scopes to return. Zero means a store-chosen default.
 	Limit int
 }

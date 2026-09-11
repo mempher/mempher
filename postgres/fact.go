@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/mempher/mempher"
+	"github.com/mempher/mempher/ops"
 )
 
 // Defaults used when the corresponding query field is left zero.
@@ -500,7 +501,7 @@ LIMIT $4`
 // order.
 func (s *Store) PendingExtractions(
 	ctx context.Context,
-	q mempher.PendingExtractions,
+	q ops.PendingExtractions,
 ) ([]mempher.EpisodeID, error) {
 	if q.Extractor == "" {
 		return nil, fmt.Errorf("mempher/postgres: pending extractions: extractor is empty: %w",

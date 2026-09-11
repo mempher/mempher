@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/mempher/mempher"
+	"github.com/mempher/mempher/ops"
 	"github.com/mempher/mempher/postgres"
 )
 
@@ -528,7 +529,7 @@ func TestPendingExtractions(t *testing.T) {
 	second := seedEpisode(t, store, "user:1", "ok, thanks")
 
 	pending, err := store.PendingExtractions(t.Context(),
-		mempher.PendingExtractions{Extractor: testExtractor})
+		ops.PendingExtractions{Extractor: testExtractor})
 	if err != nil {
 		t.Fatalf("PendingExtractions: %v", err)
 	}
@@ -552,7 +553,7 @@ func TestPendingExtractions(t *testing.T) {
 	}
 
 	pending, err = store.PendingExtractions(t.Context(),
-		mempher.PendingExtractions{Extractor: testExtractor})
+		ops.PendingExtractions{Extractor: testExtractor})
 	if err != nil {
 		t.Fatalf("PendingExtractions: %v", err)
 	}
@@ -563,7 +564,7 @@ func TestPendingExtractions(t *testing.T) {
 	// A different extractor has read nothing, so changing extractor is a
 	// backfill rather than a migration.
 	pending, err = store.PendingExtractions(t.Context(),
-		mempher.PendingExtractions{Extractor: "test-extractor@2"})
+		ops.PendingExtractions{Extractor: "test-extractor@2"})
 	if err != nil {
 		t.Fatalf("PendingExtractions: %v", err)
 	}

@@ -11,6 +11,7 @@ import (
 
 	"github.com/mempher/mempher"
 	"github.com/mempher/mempher/internal/pgtest"
+	"github.com/mempher/mempher/ops"
 	"github.com/mempher/mempher/postgres"
 )
 
@@ -270,7 +271,7 @@ func TestPendingEncodings(t *testing.T) {
 	}
 
 	t.Run("everything is pending before any worker runs", func(t *testing.T) {
-		pending, err := store.PendingEncodings(ctx, mempher.PendingEncodings{Model: testModel})
+		pending, err := store.PendingEncodings(ctx, ops.PendingEncodings{Model: testModel})
 		if err != nil {
 			t.Fatalf("PendingEncodings: %v", err)
 		}
@@ -283,7 +284,7 @@ func TestPendingEncodings(t *testing.T) {
 		if err := store.PutEncoding(ctx, encoding(ids[0], vec(1))); err != nil {
 			t.Fatalf("PutEncoding: %v", err)
 		}
-		pending, err := store.PendingEncodings(ctx, mempher.PendingEncodings{Model: testModel})
+		pending, err := store.PendingEncodings(ctx, ops.PendingEncodings{Model: testModel})
 		if err != nil {
 			t.Fatalf("PendingEncodings: %v", err)
 		}
@@ -300,7 +301,7 @@ func TestPendingEncodings(t *testing.T) {
 	t.Run("a different model sees everything again, which is how a backfill works",
 		func(t *testing.T) {
 			pending, err := store.PendingEncodings(ctx,
-				mempher.PendingEncodings{Model: "a-new-model@8"})
+				ops.PendingEncodings{Model: "a-new-model@8"})
 			if err != nil {
 				t.Fatalf("PendingEncodings: %v", err)
 			}
@@ -311,7 +312,7 @@ func TestPendingEncodings(t *testing.T) {
 
 	t.Run("one scope at a time", func(t *testing.T) {
 		pending, err := store.PendingEncodings(ctx,
-			mempher.PendingEncodings{Scope: "user:2", Model: testModel})
+			ops.PendingEncodings{Scope: "user:2", Model: testModel})
 		if err != nil {
 			t.Fatalf("PendingEncodings: %v", err)
 		}
@@ -321,7 +322,7 @@ func TestPendingEncodings(t *testing.T) {
 	})
 
 	t.Run("paging within a scope", func(t *testing.T) {
-		first, err := store.PendingEncodings(ctx, mempher.PendingEncodings{
+		first, err := store.PendingEncodings(ctx, ops.PendingEncodings{
 			Scope: "user:1", Model: testModel, Limit: 2,
 		})
 		if err != nil {
@@ -334,7 +335,7 @@ func TestPendingEncodings(t *testing.T) {
 		if first[0] != ids[1] || first[1] != ids[2] {
 			t.Errorf("first page = %v, want %v", first, ids[1:3])
 		}
-		second, err := store.PendingEncodings(ctx, mempher.PendingEncodings{
+		second, err := store.PendingEncodings(ctx, ops.PendingEncodings{
 			Scope: "user:1", Model: testModel, AfterSeq: 3, Limit: 2,
 		})
 		if err != nil {
@@ -352,13 +353,13 @@ func TestPendingEncodingsRejectsBadQueries(t *testing.T) {
 
 	tests := []struct {
 		name string
-		q    mempher.PendingEncodings
+		q    ops.PendingEncodings
 	}{
-		{name: "no model", q: mempher.PendingEncodings{}},
-		{name: "negative afterSeq", q: mempher.PendingEncodings{Model: testModel, AfterSeq: -1}},
-		{name: "afterSeq without a scope", q: mempher.PendingEncodings{Model: testModel, AfterSeq: 5}},
-		{name: "negative limit", q: mempher.PendingEncodings{Model: testModel, Limit: -1}},
-		{name: "invalid scope", q: mempher.PendingEncodings{Model: testModel, Scope: "bad\nscope"}},
+		{name: "no model", q: ops.PendingEncodings{}},
+		{name: "negative afterSeq", q: ops.PendingEncodings{Model: testModel, AfterSeq: -1}},
+		{name: "afterSeq without a scope", q: ops.PendingEncodings{Model: testModel, AfterSeq: 5}},
+		{name: "negative limit", q: ops.PendingEncodings{Model: testModel, Limit: -1}},
+		{name: "invalid scope", q: ops.PendingEncodings{Model: testModel, Scope: "bad\nscope"}},
 	}
 
 	for _, tc := range tests {

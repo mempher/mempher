@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/mempher/mempher"
+	"github.com/mempher/mempher/ops"
 	"github.com/mempher/mempher/postgres"
 )
 
@@ -741,7 +742,7 @@ func TestJobsListsAndFilters(t *testing.T) {
 	}
 
 	t.Run("everything", func(t *testing.T) {
-		got, err := store.Jobs(ctx, mempher.JobQuery{})
+		got, err := store.Jobs(ctx, ops.JobQuery{})
 		if err != nil {
 			t.Fatalf("Jobs: %v", err)
 		}
@@ -757,7 +758,7 @@ func TestJobsListsAndFilters(t *testing.T) {
 	})
 
 	t.Run("by scope", func(t *testing.T) {
-		got, err := store.Jobs(ctx, mempher.JobQuery{Scope: "user:2"})
+		got, err := store.Jobs(ctx, ops.JobQuery{Scope: "user:2"})
 		if err != nil {
 			t.Fatalf("Jobs: %v", err)
 		}
@@ -767,7 +768,7 @@ func TestJobsListsAndFilters(t *testing.T) {
 	})
 
 	t.Run("by kind", func(t *testing.T) {
-		got, err := store.Jobs(ctx, mempher.JobQuery{Kinds: []mempher.JobKind{mempher.JobKindExtract}})
+		got, err := store.Jobs(ctx, ops.JobQuery{Kinds: []mempher.JobKind{mempher.JobKindExtract}})
 		if err != nil {
 			t.Fatalf("Jobs: %v", err)
 		}
@@ -777,7 +778,7 @@ func TestJobsListsAndFilters(t *testing.T) {
 	})
 
 	t.Run("by state", func(t *testing.T) {
-		pending, err := store.Jobs(ctx, mempher.JobQuery{
+		pending, err := store.Jobs(ctx, ops.JobQuery{
 			States: []mempher.JobState{mempher.JobStatePending},
 		})
 		if err != nil {
@@ -786,7 +787,7 @@ func TestJobsListsAndFilters(t *testing.T) {
 		if len(pending) != 3 {
 			t.Errorf("pending jobs = %d, want 3", len(pending))
 		}
-		dead, err := store.Jobs(ctx, mempher.JobQuery{
+		dead, err := store.Jobs(ctx, ops.JobQuery{
 			States: []mempher.JobState{mempher.JobStateDead},
 		})
 		if err != nil {
@@ -798,14 +799,14 @@ func TestJobsListsAndFilters(t *testing.T) {
 	})
 
 	t.Run("pages by After", func(t *testing.T) {
-		page, err := store.Jobs(ctx, mempher.JobQuery{Limit: 2})
+		page, err := store.Jobs(ctx, ops.JobQuery{Limit: 2})
 		if err != nil {
 			t.Fatalf("Jobs: %v", err)
 		}
 		if len(page) != 2 {
 			t.Fatalf("first page = %d jobs, want 2", len(page))
 		}
-		rest, err := store.Jobs(ctx, mempher.JobQuery{After: page[1].ID})
+		rest, err := store.Jobs(ctx, ops.JobQuery{After: page[1].ID})
 		if err != nil {
 			t.Fatalf("Jobs: %v", err)
 		}
@@ -820,17 +821,17 @@ func TestJobsRejectsBadQueries(t *testing.T) {
 	store, _ := migrated(t)
 	ctx := t.Context()
 
-	if _, err := store.Jobs(ctx, mempher.JobQuery{
+	if _, err := store.Jobs(ctx, ops.JobQuery{
 		Kinds: []mempher.JobKind{"consolidate"},
 	}); !errors.Is(err, mempher.ErrInvalidJobKind) {
 		t.Errorf("unknown kind err = %v, want mempher.ErrInvalidJobKind", err)
 	}
-	if _, err := store.Jobs(ctx, mempher.JobQuery{
+	if _, err := store.Jobs(ctx, ops.JobQuery{
 		States: []mempher.JobState{"stuck"},
 	}); !errors.Is(err, mempher.ErrInvalidJobState) {
 		t.Errorf("unknown state err = %v, want mempher.ErrInvalidJobState", err)
 	}
-	if _, err := store.Jobs(ctx, mempher.JobQuery{Limit: -1}); !errors.Is(err, mempher.ErrInvalidConfig) {
+	if _, err := store.Jobs(ctx, ops.JobQuery{Limit: -1}); !errors.Is(err, mempher.ErrInvalidConfig) {
 		t.Errorf("negative limit err = %v, want mempher.ErrInvalidConfig", err)
 	}
 }
@@ -848,7 +849,7 @@ func TestJobStatsCountsByKindAndState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stats: %v", err)
 	}
-	buckets := map[string]mempher.JobCount{}
+	buckets := map[string]ops.JobCount{}
 	for _, count := range got {
 		buckets[string(count.Kind)+"/"+string(count.State)] = count
 	}
@@ -914,7 +915,7 @@ func TestRetryRejectsWhatIsNotDead(t *testing.T) {
 	ctx := t.Context()
 
 	seedScope(t, store, "user:1")
-	pending, err := store.Jobs(ctx, mempher.JobQuery{})
+	pending, err := store.Jobs(ctx, ops.JobQuery{})
 	if err != nil || len(pending) != 1 {
 		t.Fatalf("Jobs = %d, %v; want the one job Append enqueued", len(pending), err)
 	}
@@ -981,7 +982,7 @@ func TestPurgeDeletesOnlyFinishedJobs(t *testing.T) {
 	seedScope(t, store, "user:pending")
 
 	horizon := epoch.Add(time.Hour)
-	deleted, err := store.Purge(ctx, mempher.PurgeRequest{Before: horizon})
+	deleted, err := store.Purge(ctx, ops.PurgeRequest{Before: horizon})
 	if err != nil {
 		t.Fatalf("Purge: %v", err)
 	}
@@ -989,7 +990,7 @@ func TestPurgeDeletesOnlyFinishedJobs(t *testing.T) {
 		t.Errorf("Purge deleted %d rows, want the done one and the dead one", deleted)
 	}
 
-	left, err := store.Jobs(ctx, mempher.JobQuery{})
+	left, err := store.Jobs(ctx, ops.JobQuery{})
 	if err != nil {
 		t.Fatalf("Jobs: %v", err)
 	}
@@ -1014,7 +1015,7 @@ func TestPurgeRespectsItsHorizonAndLimit(t *testing.T) {
 	}
 
 	// Nothing is older than the epoch itself, so nothing goes.
-	deleted, err := store.Purge(ctx, mempher.PurgeRequest{Before: epoch})
+	deleted, err := store.Purge(ctx, ops.PurgeRequest{Before: epoch})
 	if err != nil {
 		t.Fatalf("Purge: %v", err)
 	}
@@ -1023,7 +1024,7 @@ func TestPurgeRespectsItsHorizonAndLimit(t *testing.T) {
 	}
 
 	// Bounded, so a deep history is a loop of short transactions.
-	deleted, err = store.Purge(ctx, mempher.PurgeRequest{Before: epoch.Add(time.Hour), Limit: 2})
+	deleted, err = store.Purge(ctx, ops.PurgeRequest{Before: epoch.Add(time.Hour), Limit: 2})
 	if err != nil {
 		t.Fatalf("Purge: %v", err)
 	}
@@ -1038,7 +1039,7 @@ func TestPurgeRefusesOutstandingWork(t *testing.T) {
 	ctx := t.Context()
 
 	for _, state := range []mempher.JobState{mempher.JobStatePending, mempher.JobStateRunning} {
-		_, err := store.Purge(ctx, mempher.PurgeRequest{
+		_, err := store.Purge(ctx, ops.PurgeRequest{
 			Before: epoch.Add(time.Hour),
 			States: []mempher.JobState{state},
 		})
@@ -1046,7 +1047,7 @@ func TestPurgeRefusesOutstandingWork(t *testing.T) {
 			t.Errorf("purging %s jobs err = %v, want mempher.ErrInvalidJobState", state, err)
 		}
 	}
-	if _, err := store.Purge(ctx, mempher.PurgeRequest{}); !errors.Is(err, mempher.ErrInvalidConfig) {
+	if _, err := store.Purge(ctx, ops.PurgeRequest{}); !errors.Is(err, mempher.ErrInvalidConfig) {
 		t.Errorf("purge with no horizon err = %v, want mempher.ErrInvalidConfig", err)
 	}
 }

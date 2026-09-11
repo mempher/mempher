@@ -37,23 +37,6 @@ type Encoding struct {
 	EncodedAt time.Time
 }
 
-// PendingEncodings asks which episodes still lack an encoding.
-//
-// The answer is derived from L0 and the encodings table alone, so it is the
-// safety net behind the queue: enqueue what it returns and any episode missed by
-// a lost job, or left behind by a change of model, gets encoded.
-type PendingEncodings struct {
-	// Scope restricts the search to one partition. Empty means all scopes,
-	// which is what a backfill wants.
-	Scope ScopeID
-	// Model is the vector space to look for. Required.
-	Model ModelID
-	// AfterSeq pages a large backfill within one scope. Requires Scope.
-	AfterSeq int64
-	// Limit is the most ids to return. Zero means a store-chosen default.
-	Limit int
-}
-
 // Embedder turns text into vectors. Documents and queries go through separate
 // methods because asymmetric models are common, and folding both into one call
 // would silently embed queries as documents.

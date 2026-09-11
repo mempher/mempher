@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/mempher/mempher"
+	"github.com/mempher/mempher/ops"
 )
 
 // maxLastErrorLen bounds what a failure message costs. A stack trace or a
@@ -435,7 +436,7 @@ func validateJobUpdate(id mempher.JobID, worker mempher.WorkerID, at time.Time) 
 // Ordering is by id, which is a uuidv7 and therefore the order the jobs were
 // created in. That makes the cursor a single column and keeps a listing stable
 // while jobs around it change state.
-func (s *Store) Jobs(ctx context.Context, q mempher.JobQuery) ([]mempher.Job, error) {
+func (s *Store) Jobs(ctx context.Context, q ops.JobQuery) ([]mempher.Job, error) {
 	if err := q.Validate(); err != nil {
 		return nil, fmt.Errorf("mempher/postgres: jobs: %w", err)
 	}
@@ -502,7 +503,7 @@ func (s *Store) Jobs(ctx context.Context, q mempher.JobQuery) ([]mempher.Job, er
 func (s *Store) Stats(
 	ctx context.Context,
 	scope mempher.ScopeID,
-) ([]mempher.JobCount, error) {
+) ([]ops.JobCount, error) {
 	if scope != "" {
 		if err := scope.Validate(); err != nil {
 			return nil, fmt.Errorf("mempher/postgres: job stats: %w", err)
@@ -529,10 +530,10 @@ WHERE true`)
 	}
 	defer rows.Close()
 
-	out := make([]mempher.JobCount, 0, 8)
+	out := make([]ops.JobCount, 0, 8)
 	for rows.Next() {
 		var (
-			count  mempher.JobCount
+			count  ops.JobCount
 			kind   string
 			state  string
 			jobs   int64
@@ -627,7 +628,7 @@ func (s *Store) explainNotRevived(ctx context.Context, id mempher.JobID) error {
 // SELECT is what makes Limit mean anything -- a bare DELETE ... LIMIT is not
 // SQL, and a purge that cannot be bounded is a purge that holds locks for as
 // long as the history is deep.
-func (s *Store) Purge(ctx context.Context, req mempher.PurgeRequest) (int, error) {
+func (s *Store) Purge(ctx context.Context, req ops.PurgeRequest) (int, error) {
 	if err := req.Validate(); err != nil {
 		return 0, fmt.Errorf("mempher/postgres: purge: %w", err)
 	}
