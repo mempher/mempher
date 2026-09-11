@@ -27,6 +27,10 @@ test: ## Fast tests only, no Docker required
 test-all: ## Every test, with the race detector; needs Docker
 	$(GO) test -race -count=1 $(PKGS)
 
+.PHONY: bench
+bench: ## Benchmark the write and read paths against a real PostgreSQL 18
+	$(GO) test -run '^$$' -bench . -benchtime 2s $(PKGS)
+
 .PHONY: cover
 cover: ## Every test with a coverage profile, then report the total
 	$(GO) test -race -count=1 -coverprofile=$(COVER) -covermode=atomic $(PKGS)

@@ -19,29 +19,19 @@
 
 ---
 
-One database and one binary. No graph store, no vector service, no Python
-sidecar, and no model client. `Embedder` and `Extractor` are interfaces you
-satisfy with whatever you already use.
+## The idea
 
-## The invariant
+**Your agent's memory is an append-only log. Everything else — the vectors, the
+facts — is a projection you can delete and rebuild by replaying it.**
 
-Memory is layered, and the layers are not peers.
+That is the whole design, and everything good about mempher falls out of it.
+Change your embedding model, fix a bad extraction prompt, or honour an erasure
+request: nothing is lost that the log did not lose. A projection is never
+precious, because it can always be derived again.
 
-**Episodes (L0) are immutable and the only source of truth.** Everything else is
-a projection derived from them: vector encodings, and the facts an extractor
-reads out of them with the event-time window over which each one holds. A
-projection can be dropped and rebuilt at any time by replaying L0 through the
-same deriving code.
-
-Two rules follow, and the schema enforces both. A trigger on `episodes` rejects
-`UPDATE` and `TRUNCATE` outright, and rejects `DELETE` unless the transaction has
-said it is erasing:
-
-- an episode is never updated — a row that exists is exactly what was recorded;
-- a projection is only ever written by a worker draining the job queue.
-
-That is what makes a bad extractor recoverable, and what makes erasure a thing
-you can point at rather than a `DELETE` anyone can write.
+**And a fact that stops being true has its window closed, not its row
+overwritten.** "Where do they live?" and "where did they live last year?" are
+different questions, and both still have an answer.
 
 ```mermaid
 flowchart TB
@@ -66,6 +56,67 @@ flowchart TB
     class APP,RC act
 ```
 
+One PostgreSQL database and your binary. No graph store, no vector service, no
+Python sidecar, and no model client — `Embedder` and `Extractor` are two small
+interfaces you satisfy with whatever you already use.
+
+## Why it is built this way
+
+Most memory for agents mutates what it knows: a store of facts or summaries that
+get rewritten as the world changes. That is simpler until the day something goes
+wrong, and then there is nothing to go back to.
+
+| | The common approach | mempher |
+| --- | --- | --- |
+| **When a fact changes** | the row is updated in place | the old window is closed; both answers survive |
+| **When your extraction prompt was wrong** | the bad output is the state | drop the projection, replay the log |
+| **When you change embedding model** | re-ingest, or migrate vectors | it's a backfill; the log never moved |
+| **When someone asks to be erased** | delete rows and hope nothing derived survived | one transaction, counted, with everything derived from them |
+| **Where "what was true last year" lives** | usually nowhere | in the fact's validity window |
+| **What you have to run** | a vector DB, often a graph DB, often a sidecar | PostgreSQL |
+
+The trade-off is real and worth stating: you need PostgreSQL 18, you do your own
+embedding calls, and a projection is only as current as your worker. What you get
+back is a memory you can always rebuild, and a straight answer to "why does it
+think that?" — every fact carries the episodes it was read from.
+
+## Try it
+
+One container and one command:
+
+```sh
+docker run --rm -p 5432:5432 -e POSTGRES_PASSWORD=mempher pgvector/pgvector:pg18
+go run ./examples/quickstart
+```
+
+No API key: the example uses a deterministic hashed-bag-of-words embedder and a
+few substring rules in place of a model, so it runs anywhere. They are exactly
+the two interfaces you replace with a real provider, and nothing else in that
+file changes when you do.
+
+```
+appended 3 episodes -- already searchable lexically
+worker drained 6 jobs -- now searchable semantically, and facts exist
+
+query: "allergic to hazelnuts"
+  fact     the user is allergic to hazelnuts  [since 2019-05-10, still true]
+  fact     the user lives in Paris  [since 2019-04-01, still true]
+  episode  0.0328  "I'm allergic to hazelnuts, so no Nutella."  via lexical+semantic
+  episode  0.0161  "I moved to Paris last spring."  via semantic
+
+---- after moving to Berlin ----
+query: "moved to Berlin"
+  fact     the user lives in Berlin  [since 2024-06-01, still true]
+
+---- and where did they live in 2020? ----
+  fact  the user lives in Paris  [2019-04-01 to 2024-06-01]
+
+erased: 4 episodes, 4 encodings, 3 facts, 8 jobs (scope removed: true)
+```
+
+That last pair is the point. Berlin is the answer now; Paris is still the answer
+for 2020, bounded by exactly when it stopped being true.
+
 ## Three loops
 
 | Loop | When | Model calls | Does |
@@ -73,22 +124,6 @@ flowchart TB
 | **Write** | hot path, one round trip | none | insert one episode, capture its binding, enqueue the work it implies |
 | **Consolidate** | offline, batched, replayable | all of them | drain the queue: embed episodes, extract facts; idempotent, so retries are free |
 | **Read** | synchronous | one, to embed the query | parallel channels → reciprocal rank fusion over episodes, validity filter over facts → token budget → results with provenance |
-
-## Two layers, not two rankings
-
-L0 is what was said. L1 is what is true. Recall returns both and does not rank
-them against each other: episodes are fused by relevance to the query, while
-facts are simply what the scope currently believes, spent from the token budget
-first. A fact carries the window it holds over, so the answer to "where do they
-live?" and the answer to "where did they live last year?" are both still there.
-
-Nothing is ever deleted to make that work. A claim the world has moved past has
-its window closed, and stays answerable. Deleting is a separate operation with a
-separate name, below.
-
-<div align="center">
-<img src="assets/how-it-works.gif" alt="A fact is bounded in time rather than overwritten, so both now and last year still have an answer" width="700" />
-</div>
 
 ## Usage
 
@@ -100,7 +135,7 @@ _, err = postgres.Migrate(ctx, pool, postgres.MigrateOptions{
 	VectorDimensions: myEmbedder.Dimensions(),
 })
 
-store, err := postgres.New(ctx, pool) // satisfies both mempher.Store and mempher.Queue
+store, err := postgres.New(ctx, pool) // satisfies every port, off one pool
 
 // Extractor is optional. Leave it nil and L1 is off: no extract jobs, no facts.
 mem, err := mempher.New(mempher.Config{
@@ -133,7 +168,7 @@ for _, r := range rec.Episodes {
 }
 ```
 
-Encoding happens off the write path, so run a worker:
+Consolidation happens off the write path, so run a worker:
 
 ```go
 w, err := mempher.NewWorker(mempher.WorkerConfig{
@@ -142,19 +177,38 @@ w, err := mempher.NewWorker(mempher.WorkerConfig{
 go w.Run(ctx) // or w.DrainOnce(ctx) for a one-shot, and in tests
 ```
 
-If a job dies, an extractor is configured after the fact, or a model changes,
-ask L0 what work it implies and enqueue whatever the queue is missing:
+An episode is durable and **lexically** searchable the moment `Append` returns,
+because the `tsvector` is a generated column. It becomes **semantically**
+searchable once a worker encodes it, and has yielded whatever **facts** it holds
+once a worker extracts it. Recall fuses whichever channels answered and reports
+what each contributed, so a thin result is never mistaken for an empty memory.
 
-```go
-// Everything with no encoding for this Embedder, and nothing an Extractor has
-// already read. Safe to run live, safe to run twice, and resumable.
-res, err := w.Backfill(ctx, mempher.BackfillRequest{})
-```
+## The invariant, and what enforces it
 
-That is what makes "drop the projection and replay L0" a real repair rather than
-a slogan. The queue itself is readable and prunable for the same reason —
-`Jobs` lists it by scope, kind and state, `Stats` gives each bucket's depth and
-age, `Retry` revives a dead job, `Purge` takes the history.
+**Episodes (L0) are immutable and the only source of truth.** A trigger on
+`episodes` rejects `UPDATE` and `TRUNCATE` outright, and rejects `DELETE` unless
+the transaction has declared that it is erasing:
+
+- an episode is never updated — a row that exists is exactly what was recorded;
+- a projection is only ever written by a worker draining the job queue.
+
+That is what makes a bad extractor recoverable, and what makes erasure something
+you can point at rather than a `DELETE` anyone can write.
+
+## Two layers, not two rankings
+
+L0 is what was said. L1 is what is true. Recall returns both and does not rank
+them against each other: episodes are fused by relevance to the query, while
+facts are simply what the scope currently believes, spent from the token budget
+first. A fact carries the window it holds over, so the answer to "where do they
+live?" and the answer to "where did they live last year?" are both still there.
+
+Nothing is ever deleted to make that work. A claim the world has moved past has
+its window closed, and stays answerable.
+
+<div align="center">
+<img src="assets/how-it-works.gif" alt="A fact is bounded in time rather than overwritten, so both now and last year still have an answer" width="700" />
+</div>
 
 ## Forgetting means two things
 
@@ -172,11 +226,46 @@ rather than closed, because a closed window still says what it said — and that
 safe for the reason every projection is safe: if what remains still supports the
 claim, the next extraction re-derives it.
 
-An episode is durable and **lexically** searchable the moment `Append` returns,
-because the `tsvector` is a generated column. It becomes **semantically**
-searchable once a worker encodes it, and has yielded whatever **facts** it holds
-once a worker extracts it. Recall fuses whichever channels answered and reports
-what each contributed, so a thin result is never mistaken for an empty memory.
+## Operating it
+
+Everything you need to run mempher in production, and nothing you need to use it,
+lives in [`mempher/ops`](https://pkg.go.dev/github.com/mempher/mempher/ops):
+
+```go
+o, err := ops.New(ops.Config{Store: store, Embedder: myEmbedder})
+
+// The work L0 implies but the queue has lost: a job that died, a scope that
+// predates your Extractor, a model id that changed last week.
+res, err := o.Backfill(ctx, ops.BackfillRequest{})
+
+// And the queue as something to read, not just to drain.
+dead, err := o.Jobs(ctx, ops.JobQuery{States: []mempher.JobState{mempher.JobStateDead}})
+depth, err := o.Stats(ctx, "")          // per kind and state, with the oldest job's age
+_, err = o.Retry(ctx, dead[0].ID)       // once you have dealt with the cause
+_, err = o.Purge(ctx, ops.PurgeRequest{Before: lastMonth})
+```
+
+`Backfill` asks L0 what work it implies and enqueues whatever is missing, reading
+the projection tables rather than the queue's own history. It is safe to run
+live, safe to run twice, and resumable — which is what makes "drop the projection
+and replay" a real repair rather than a slogan.
+
+## How fast
+
+Against PostgreSQL 18 in a container on a developer laptop, over a scope of 1,000
+episodes, with a microsecond-cost embedder so the numbers are mempher's own:
+
+| | per operation |
+| --- | --- |
+| `Append` | **0.59 ms** — one round trip, no model call |
+| `Recall`, all channels | **4.1 ms** |
+| `Recall`, semantic only | 2.5 ms |
+| `Recall`, lexical only | 1.1 ms |
+| `Recall`, with L1 facts | 4.3 ms |
+
+Your own embedder adds its latency to `Recall` and *nothing at all* to `Append` —
+that is the reason the write path makes no model call. Reproduce with
+`make bench`.
 
 ## Requirements
 
@@ -194,6 +283,7 @@ application schema and uninstalls by dropping one schema.
 ```sh
 make test      # fast suite, no Docker: DB tests guard on testing.Short()
 make test-all  # everything, with -race, against a real PostgreSQL 18 container
+make bench     # the numbers above
 make check     # what CI runs
 ```
 

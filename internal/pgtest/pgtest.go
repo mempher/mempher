@@ -52,8 +52,12 @@ var (
 // with t. The database has no mempher schema, so a test can exercise migration
 // behaviour too.
 //
+// It takes a [testing.TB] rather than a *testing.T so that benchmarks get the
+// same isolated database a test does: measuring append latency against a
+// database another benchmark is writing to would measure the other benchmark.
+//
 // It skips under -short, which is the single place that guard lives.
-func Pool(t *testing.T) *pgxpool.Pool {
+func Pool(t testing.TB) *pgxpool.Pool {
 	t.Helper()
 	if testing.Short() {
 		t.Skipf("pgtest: skipped under -short (needs Docker and %s)", Image)
@@ -132,7 +136,7 @@ func adminExec(ctx context.Context, stmt string) error {
 }
 
 // databaseName derives a unique, legal, recognisable identifier.
-func databaseName(t *testing.T) string {
+func databaseName(t testing.TB) string {
 	safe := strings.Map(func(r rune) rune {
 		switch {
 		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_':
