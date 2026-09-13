@@ -2,8 +2,11 @@ package extract
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -513,5 +516,51 @@ func TestInstructionsReachThePrompt(t *testing.T) {
 	e := newExtractor(t, newFake(), Options{Instructions: "care about entitlements"})
 	if !strings.Contains(e.prompt(), "care about entitlements") {
 		t.Fatal("the domain addendum never reaches the model")
+	}
+}
+
+func TestPromptRevisionIsPinnedToTheTextItShips(t *testing.T) {
+	// PromptVersion has to move when the prompt or the schema does, and nothing
+	// else can notice that it has not. The digest inside an extractor id is
+	// built from Options, which is the caller's input; the text shipped here is
+	// not in it, deliberately, so that fixing a typo in a comment does not put
+	// every deployment through a backfill.
+	//
+	// That leaves the revision resting on the discipline of whoever edits the
+	// prompt, which is exactly the kind of invariant this library does not
+	// leave to discipline anywhere else. So it is pinned.
+	//
+	// If this test fails you changed what the model is asked. That is a real
+	// change -- it changes what gets asserted -- so bump PromptVersion and
+	// record the new digest here in the same commit. Facts from the old
+	// revision then stay the old revision's until ops.Backfill re-derives them,
+	// which is the intended cost and the whole reason the revision is in the id.
+	const (
+		pinnedRevision = 1
+		pinnedDigest   = "ea4099386a43a723"
+	)
+
+	schema, err := extractionSchema(Options{MaxAssertions: DefaultMaxAssertions})
+	if err != nil {
+		t.Fatalf("extractionSchema: %v", err)
+	}
+	topics, err := topicsSchema()
+	if err != nil {
+		t.Fatalf("topicsSchema: %v", err)
+	}
+
+	h := sha256.New()
+	for _, part := range []string{extractionSystem, topicsPrompt, string(schema), string(topics)} {
+		_, _ = fmt.Fprintf(h, "%d:%s", len(part), part)
+	}
+	got := hex.EncodeToString(h.Sum(nil))[:16]
+
+	if PromptVersion != pinnedRevision {
+		t.Fatalf("PromptVersion is %d but this test pins %d; update both together",
+			PromptVersion, pinnedRevision)
+	}
+	if got != pinnedDigest {
+		t.Fatalf("the shipped prompt or schema changed (digest %s, pinned %s) "+
+			"but PromptVersion is still %d", got, pinnedDigest, PromptVersion)
 	}
 }
