@@ -57,8 +57,8 @@ flowchart TB
 ```
 
 One PostgreSQL database and your binary. No graph store, no vector service, no
-Python sidecar, and no model client — `Embedder` and `Extractor` are two small
-interfaces you satisfy with whatever you already use.
+Python sidecar, and no model client you did not choose — `Embedder` and
+`Extractor` are two small interfaces, and the extractor half ships working.
 
 ## Why it is built this way
 
@@ -196,29 +196,34 @@ provider's problem, not yours.
 
 `Extractor` is the hard one, and
 [`mempher/extract`](https://pkg.go.dev/github.com/mempher/mempher/extract) ships
-a reference implementation so that it is not the first thing you have to get
-right. It owns the prompt, the response schema and the validation that decides
-what a `FactStore` will accept. You supply one method, and no dependency comes
-with it.
+it working. It owns the prompt, the response schema and the validation that
+decides what a `FactStore` will accept — the part that is a prompt rather than a
+schema, and the part most likely to be wrong.
 
 ```go
-// One structured model call. Everything else -- what to ask, how to read the
-// answer, and what to do when the answer is wrong -- is in the package.
-type Completer interface {
-	Complete(ctx context.Context, p extract.Prompt) ([]byte, error)
-	Model() string
-}
+// Both adapters speak the provider's REST API directly. No SDK, and nothing
+// new in your go.mod: still pgx and uuid.
+completer, err := anthropic.New(anthropic.Config{Model: "claude-opus-5"})
 
-ex, err := extract.New(myCompleter, extract.Options{
+// openai.New is the same shape, and BaseURL points it at anything
+// OpenAI-compatible: Azure, Groq, Together, OpenRouter, Ollama, vLLM.
+completer, err := openai.New(openai.Config{Model: "gpt-5"})
+
+ex, err := extract.New(completer, extract.Options{
 	// The most valuable option here. A triple is identity, so a model that
 	// writes "lives_in" today and "resides_in" tomorrow supersedes nothing,
-	// ever. The vocabulary goes into the schema as an enum.
+	// ever. The vocabulary goes into the schema as an enum, so the provider
+	// enforces it rather than the parser catching it afterwards.
 	Predicates:   []mempher.Predicate{"lives_in", "allergic_to", "works_at"},
 	Instructions: "A support agent: care about entitlements and past incidents.",
 })
 
 fmt.Println(ex.Model()) // mempher-extract/v1+claude-opus-5+a3f9c1e2
 ```
+
+Any other provider is one method — `Complete(ctx, extract.Prompt) ([]byte, error)`
+plus `Model() string`. The adapter hands the prompt over and returns the bytes;
+reading the answer is the package's job.
 
 That id is the point of the package. It composes the shipped prompt revision,
 your model, and a digest of the options -- so editing the instructions makes a
