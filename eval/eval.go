@@ -59,9 +59,14 @@ type Config struct {
 	// the semantic and fact channels have something to answer with. Nil leaves
 	// projections unbuilt, which is a lexical-only run.
 	Worker *mempher.Worker
-	// Channels selects which channels to measure. Empty means whatever the
-	// Memory would run by default.
-	Channels []mempher.Channel
+	// Channels selects the channel sets to measure, each scored separately.
+	// Empty means one set: whatever the Memory would run by default.
+	//
+	// It is a list of sets rather than one set because a haystack is ingested
+	// once for all of them. Encoding a corpus is the expensive half of a run by
+	// a wide margin, and running three times to compare three channel sets
+	// would embed the same quarter of a million episodes three times over.
+	Channels [][]mempher.Channel
 	// Limit is how many episodes recall returns, and the k in every metric.
 	// Zero means [DefaultLimit].
 	Limit int
@@ -124,78 +129,108 @@ type Result struct {
 // an abstention case, where the right answer is that the memory holds nothing --
 // is skipped rather than scored, because recall has no target to hit and any
 // number for it would be arbitrary.
-func Run(ctx context.Context, cfg Config, ds Dataset) (Summary, error) {
+func Run(ctx context.Context, cfg Config, ds Dataset) ([]Summary, error) {
 	if cfg.Memory == nil {
-		return Summary{}, fmt.Errorf("eval: run: Memory is required: %w", mempher.ErrInvalidConfig)
+		return nil, fmt.Errorf("eval: run: Memory is required: %w", mempher.ErrInvalidConfig)
 	}
 	limit := cfg.Limit
 	if limit == 0 {
 		limit = DefaultLimit
 	}
+	sets := cfg.Channels
+	if len(sets) == 0 {
+		sets = [][]mempher.Channel{nil}
+	}
 
-	summary := Summary{Dataset: ds.Name, Limit: limit, ByType: map[string]*TypeSummary{}}
-	for question, err := range ds.Questions {
-		if err != nil {
-			return Summary{}, err
-		}
-		if len(question.Relevant) == 0 {
-			summary.Skipped++
-			continue
-		}
-		result, err := run(ctx, cfg, question, limit)
-		if err != nil {
-			return Summary{}, err
-		}
-		summary.add(result)
-		if cfg.Progress != nil {
-			cfg.Progress(summary.Questions, result)
+	summaries := make([]Summary, len(sets))
+	for i, set := range sets {
+		summaries[i] = Summary{
+			Dataset:  ds.Name,
+			Channels: set,
+			Limit:    limit,
+			ByType:   map[string]*TypeSummary{},
 		}
 	}
-	summary.finish()
-	return summary, nil
+
+	for question, err := range ds.Questions {
+		if err != nil {
+			return nil, err
+		}
+		if len(question.Relevant) == 0 {
+			for i := range summaries {
+				summaries[i].Skipped++
+			}
+			continue
+		}
+		results, err := run(ctx, cfg, question, limit, sets)
+		if err != nil {
+			return nil, err
+		}
+		for i := range results {
+			summaries[i].add(results[i])
+		}
+		if cfg.Progress != nil {
+			cfg.Progress(summaries[0].Questions, results[0])
+		}
+	}
+	for i := range summaries {
+		summaries[i].finish()
+	}
+	return summaries, nil
 }
 
-func run(ctx context.Context, cfg Config, q Question, limit int) (Result, error) {
+func run(
+	ctx context.Context,
+	cfg Config,
+	q Question,
+	limit int,
+	sets [][]mempher.Channel,
+) ([]Result, error) {
 	scope := mempher.ScopeID("eval:" + q.ID)
 
 	started := time.Now()
 	if err := ingest(ctx, cfg.Memory, scope, q.Haystack); err != nil {
-		return Result{}, fmt.Errorf("eval: %s: ingest: %w", q.ID, err)
+		return nil, fmt.Errorf("eval: %s: ingest: %w", q.ID, err)
 	}
 	if cfg.Worker != nil {
-		if _, err := cfg.Worker.DrainOnce(ctx); err != nil {
-			return Result{}, fmt.Errorf("eval: %s: drain: %w", q.ID, err)
+		if err := drain(ctx, cfg.Worker); err != nil {
+			return nil, fmt.Errorf("eval: %s: drain: %w", q.ID, err)
 		}
 	}
 	ingested := time.Since(started)
 
-	started = time.Now()
-	request := mempher.RecallRequest{
-		Scope:    scope,
-		Query:    q.Query,
-		Channels: cfg.Channels,
-		Limit:    limit,
+	results := make([]Result, len(sets))
+	for i, set := range sets {
+		request := mempher.RecallRequest{
+			Scope:    scope,
+			Query:    q.Query,
+			Channels: set,
+			Limit:    limit,
+		}
+		if cfg.BoundByQuestionTime {
+			request.OccurredTo = q.Asked
+		}
+		recalledAt := time.Now()
+		recollection, err := cfg.Memory.Recall(ctx, request)
+		if err != nil {
+			return nil, fmt.Errorf("eval: %s: recall %v: %w", q.ID, set, err)
+		}
+		results[i] = score(q, recollection, limit)
+		results[i].Channels = recollection.Channels
+		results[i].Latency = time.Since(recalledAt)
+		// Charged to the first set only, so that a total stays a total rather
+		// than the same ingestion counted once per set.
+		if i == 0 {
+			results[i].Ingest = ingested
+		}
 	}
-	if cfg.BoundByQuestionTime {
-		request.OccurredTo = q.Asked
-	}
-	recollection, err := cfg.Memory.Recall(ctx, request)
-	if err != nil {
-		return Result{}, fmt.Errorf("eval: %s: recall: %w", q.ID, err)
-	}
-	recalled := time.Since(started)
-
-	result := score(q, recollection, limit)
-	result.Channels = recollection.Channels
-	result.Ingest = ingested
-	result.Latency = recalled
 
 	if cfg.Store != nil {
 		if _, err := cfg.Store.Forget(ctx, mempher.ForgetRequest{Scope: scope}); err != nil {
-			return Result{}, fmt.Errorf("eval: %s: erase the scope: %w", q.ID, err)
+			return nil, fmt.Errorf("eval: %s: erase the scope: %w", q.ID, err)
 		}
 	}
-	return result, nil
+	return results, nil
 }
 
 // ingest writes the haystack in full batches, which is both faster and closer
@@ -218,4 +253,26 @@ func ingest(
 		}
 	}
 	return nil
+}
+
+// maxDrainPasses bounds the drain loop. A job that fails is not re-leased until
+// its backoff expires, so the loop ends on its own; this only stops a bug from
+// turning a benchmark into a spin.
+const maxDrainPasses = 1000
+
+// drain empties the queue, rather than running the single batch DrainOnce
+// claims. One haystack is several hundred episodes and therefore several encode
+// jobs, so a single pass would leave most of them unencoded and quietly measure
+// a semantic channel that had nothing to search.
+func drain(ctx context.Context, worker *mempher.Worker) error {
+	for range maxDrainPasses {
+		done, err := worker.DrainOnce(ctx)
+		if err != nil {
+			return err
+		}
+		if done == 0 {
+			return nil
+		}
+	}
+	return fmt.Errorf("eval: the queue did not empty in %d passes", maxDrainPasses)
 }

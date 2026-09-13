@@ -58,7 +58,7 @@ flowchart TB
 
 One PostgreSQL database and your binary. No graph store, no vector service, no
 Python sidecar, and no model client you did not choose — `Embedder` and
-`Extractor` are two small interfaces, and the extractor half ships working.
+`Extractor` are two small interfaces, and both halves ship working.
 
 ## Why it is built this way
 
@@ -191,8 +191,29 @@ what each contributed, so a thin result is never mistaken for an empty memory.
 
 Two ports, and they cost very different amounts of work.
 
-`Embedder` is twenty lines against any provider SDK. The vector space is the
-provider's problem, not yours.
+`Embedder` is the easy one, and
+[`mempher/embed/openai`](https://pkg.go.dev/github.com/mempher/mempher/embed/openai)
+covers it against any OpenAI-compatible embeddings endpoint — which is most of
+them, local servers included.
+
+```go
+embedder, err := openai.New(openai.Config{
+	Model:      "text-embedding-3-small",
+	Dimensions: 1536,
+})
+
+// Asymmetric models — bge, e5 — want an instruction on the query side only.
+// It is part of the model id, because it changes where queries land.
+embedder, err := openai.New(openai.Config{
+	Model: "bge-small-en-v1.5", Dimensions: 384,
+	BaseURL:     "http://localhost:8080/v1",
+	QueryPrefix: "Represent this sentence for searching relevant passages: ",
+})
+```
+
+The width is declared rather than discovered, because the schema is migrated for
+it, and every reply is checked against it — a model swapped for one of another
+size is caught at the call rather than at a constraint three statements later.
 
 `Extractor` is the hard one, and
 [`mempher/extract`](https://pkg.go.dev/github.com/mempher/mempher/extract) ships

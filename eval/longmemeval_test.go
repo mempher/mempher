@@ -2,12 +2,14 @@ package eval_test
 
 import (
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/mempher/mempher"
+	"github.com/mempher/mempher/embed/openai"
 	"github.com/mempher/mempher/eval"
 	"github.com/mempher/mempher/internal/pgtest"
 	"github.com/mempher/mempher/memphertest"
@@ -37,7 +39,7 @@ func TestLongMemEval(t *testing.T) {
 	}
 
 	pool := pgtest.Pool(t)
-	embedder := memphertest.NewEmbedder(dims)
+	embedder := embedderFromEnv(t)
 	if _, err := postgres.Migrate(t.Context(), pool, postgres.MigrateOptions{
 		VectorDimensions: embedder.Dimensions(),
 	}); err != nil {
@@ -52,10 +54,24 @@ func TestLongMemEval(t *testing.T) {
 		t.Fatalf("mempher.New: %v", err)
 	}
 
-	channels := channelsFromEnv()
+	// A worker only when the semantic channel is being measured: encoding a
+	// quarter of a million episodes is the expensive half of the run, and a
+	// lexical measurement does not read a single vector.
+	sets := channelSetsFromEnv(embedder)
+	var worker *mempher.Worker
+	if usesSemantic(sets) {
+		worker, err = mempher.NewWorker(mempher.WorkerConfig{
+			Store: store, Embedder: embedder, ID: "eval",
+		})
+		if err != nil {
+			t.Fatalf("mempher.NewWorker: %v", err)
+		}
+	}
+
 	cfg := eval.Config{
 		Memory:   memory,
-		Channels: channels,
+		Worker:   worker,
+		Channels: sets,
 		Limit:    intFromEnv("LONGMEMEVAL_K", eval.DefaultLimit),
 		Progress: func(done int, last eval.Result) {
 			if done%25 == 0 {
@@ -66,23 +82,39 @@ func TestLongMemEval(t *testing.T) {
 
 	dataset := capped(eval.LongMemEval(path), intFromEnv("LONGMEMEVAL_QUESTIONS", 0))
 	started := time.Now()
-	summary, err := eval.Run(t.Context(), cfg, dataset)
+	summaries, err := eval.Run(t.Context(), cfg, dataset)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
-	t.Logf("channels: %v, wall clock %s\n\n%s",
-		channels, time.Since(started).Round(time.Second), summary)
+	t.Logf("embedder %s, wall clock %s", embedder.Model(), time.Since(started).Round(time.Second))
+	for _, summary := range summaries {
+		t.Logf("\n%s", summary)
+	}
 
-	if summary.Questions == 0 {
+	if summaries[0].Questions == 0 {
 		t.Fatal("the benchmark scored no questions at all")
 	}
 	// Not a quality bar -- the numbers are reported, not asserted. This catches
-	// the run that silently retrieved nothing because a channel was misnamed or
-	// the haystack never landed.
-	if summary.HitRate == 0 {
-		t.Error("every question missed, which means the harness is broken, not the ranking")
+	// the run that retrieved nothing because a channel was misnamed or the
+	// haystack never landed, which otherwise looks like a bad score.
+	for _, summary := range summaries {
+		if summary.HitRate == 0 {
+			t.Errorf("every question missed on %v, so the harness is broken, not the ranking",
+				summary.Channels)
+		}
 	}
+}
+
+// usesSemantic reports whether any set needs episodes to have been encoded,
+// which is what decides if the run pays for a worker.
+func usesSemantic(sets [][]mempher.Channel) bool {
+	for _, set := range sets {
+		if slices.Contains(set, mempher.ChannelSemantic) {
+			return true
+		}
+	}
+	return false
 }
 
 // capped shortens a dataset, for a smoke run over a handful of questions.
@@ -105,21 +137,62 @@ func capped(ds eval.Dataset, limit int) eval.Dataset {
 	return ds
 }
 
-// channelsFromEnv selects the channels to measure. The default is lexical
-// alone, because it is the only channel that answers without a model: the
-// semantic channel needs a real Embedder and a Worker to have encoded anything,
-// and the stand-in embedder here would produce a number that describes a hash
-// function rather than a retrieval system.
-func channelsFromEnv() []mempher.Channel {
+// embedderFromEnv builds the embedder under test.
+//
+// With LONGMEMEVAL_EMBED_URL set it is a real model behind an OpenAI-compatible
+// endpoint -- a provider, or anything local that speaks the same shape. Without
+// it the stand-in hashed bag of words stands in, which is fine for a lexical run
+// because nothing reads a vector, and useless for a semantic one: a number from
+// it would describe a hash function rather than a retrieval system.
+func embedderFromEnv(t *testing.T) mempher.Embedder {
+	t.Helper()
+	url := os.Getenv("LONGMEMEVAL_EMBED_URL")
+	if url == "" {
+		return memphertest.NewEmbedder(dims)
+	}
+	embedder, err := openai.New(openai.Config{
+		BaseURL:     url,
+		Model:       os.Getenv("LONGMEMEVAL_EMBED_MODEL"),
+		Dimensions:  intFromEnv("LONGMEMEVAL_EMBED_DIMS", 0),
+		QueryPrefix: os.Getenv("LONGMEMEVAL_EMBED_PREFIX"),
+		MaxBatch:    intFromEnv("LONGMEMEVAL_EMBED_BATCH", 0),
+	})
+	if err != nil {
+		t.Fatalf("openai.New: %v", err)
+	}
+	return embedder
+}
+
+// channelSetsFromEnv selects what to measure.
+//
+// With a real embedder the default is all three sets -- each channel alone and
+// then fused -- because that is the comparison worth having and the haystack is
+// ingested once for all of them. Without one it is lexical alone, since nothing
+// else can answer.
+//
+// LONGMEMEVAL_CHANNELS overrides it: sets separated by spaces, channels within a
+// set by commas, as in "lexical semantic semantic,lexical".
+func channelSetsFromEnv(embedder mempher.Embedder) [][]mempher.Channel {
 	raw := os.Getenv("LONGMEMEVAL_CHANNELS")
 	if raw == "" {
-		return []mempher.Channel{mempher.ChannelLexical}
+		if _, stand := embedder.(*memphertest.Embedder); stand {
+			return [][]mempher.Channel{{mempher.ChannelLexical}}
+		}
+		return [][]mempher.Channel{
+			{mempher.ChannelLexical},
+			{mempher.ChannelSemantic},
+			{mempher.ChannelSemantic, mempher.ChannelLexical},
+		}
 	}
-	var channels []mempher.Channel
-	for _, name := range strings.Split(raw, ",") {
-		channels = append(channels, mempher.Channel(strings.TrimSpace(name)))
+	var sets [][]mempher.Channel
+	for _, group := range strings.Fields(raw) {
+		var set []mempher.Channel
+		for _, name := range strings.Split(group, ",") {
+			set = append(set, mempher.Channel(strings.TrimSpace(name)))
+		}
+		sets = append(sets, set)
 	}
-	return channels
+	return sets
 }
 
 func intFromEnv(key string, fallback int) int {

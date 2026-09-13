@@ -79,9 +79,11 @@ type TypeSummary struct {
 
 // Summary is what a run measured.
 type Summary struct {
-	// Dataset names the corpus, and Limit is the k every metric is at.
-	Dataset string
-	Limit   int
+	// Dataset names the corpus, Channels the set that was measured, and Limit
+	// is the k every metric is at.
+	Dataset  string
+	Channels []mempher.Channel
+	Limit    int
 	// Questions is how many were scored, and Skipped how many were passed
 	// over for labelling no relevant episode at all.
 	Questions int
@@ -180,8 +182,16 @@ func percentile(sorted []time.Duration, p float64) time.Duration {
 // String renders the summary as the table a run is worth reporting as.
 func (s Summary) String() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s -- %d questions scored, %d skipped as unanswerable, k=%d\n\n",
-		s.Dataset, s.Questions, s.Skipped, s.Limit)
+	channels := "default"
+	if len(s.Channels) > 0 {
+		names := make([]string, len(s.Channels))
+		for i, channel := range s.Channels {
+			names[i] = channel.String()
+		}
+		channels = strings.Join(names, "+")
+	}
+	fmt.Fprintf(&b, "%s -- %s -- %d scored, %d skipped, k=%d\n\n",
+		s.Dataset, channels, s.Questions, s.Skipped, s.Limit)
 	fmt.Fprintf(&b, "  %-26s %5s  %8s %10s %8s %7s\n",
 		"category", "n", "hit@k", "recall@k", "nDCG@k", "MRR")
 	fmt.Fprintf(&b, "  %s\n", strings.Repeat("-", 70))
