@@ -31,6 +31,14 @@ test-all: ## Every test, with the race detector; needs Docker
 bench: ## Benchmark the write and read paths against a real PostgreSQL 18
 	$(GO) test -run '^$$' -bench . -benchtime 2s $(PKGS)
 
+.PHONY: eval
+eval: ## Retrieval quality against LongMemEval; needs LONGMEMEVAL=/path/to/longmemeval_s
+	@test -n "$(LONGMEMEVAL)" || { \
+		echo "set LONGMEMEVAL to the dataset file, e.g."; \
+		echo "  make eval LONGMEMEVAL=~/longmemeval_s"; \
+		exit 1; }
+	LONGMEMEVAL=$(LONGMEMEVAL) $(GO) test ./eval/ -run LongMemEval -v -count=1 -timeout 60m
+
 .PHONY: cover
 cover: ## Every test with a coverage profile, then report the total
 	$(GO) test -race -count=1 -coverprofile=$(COVER) -covermode=atomic $(PKGS)
