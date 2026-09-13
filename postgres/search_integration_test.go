@@ -554,3 +554,79 @@ func TestSearchOrderIsStableUnderTies(t *testing.T) {
 		}
 	}
 }
+
+// TestSearchLexicalMatchesAnyTerm pins the property that decides whether the
+// lexical channel answers a real question at all.
+//
+// It shipped the other way: websearch_to_tsquery puts AND between terms, so an
+// episode had to carry every word of the query. Against LongMemEval that left
+// 83% of questions matching nothing, and every existing test still passed --
+// because every one of them queried a single word. This is the test whose
+// absence let that through.
+func TestSearchLexicalMatchesAnyTerm(t *testing.T) {
+	t.Parallel()
+	store, _ := migrated(t)
+	ctx := t.Context()
+	later := epoch.Add(time.Hour)
+
+	seed(t, store, "user:1", "I moved to Berlin in June for a new job", epoch, nil)
+	seed(t, store, "user:1", "Berlin is cold in winter", epoch, nil)
+	seed(t, store, "user:1", "My new job starts on Monday", epoch, nil)
+	seed(t, store, "user:1", "I had pasta for dinner", epoch, nil)
+
+	// The shape of a real question: no single episode holds all of it.
+	const question = "why did I move to Berlin for a new job in June"
+
+	t.Run("a conversational query matches partial overlaps", func(t *testing.T) {
+		got, err := store.SearchLexical(ctx, lexical("user:1", question, later))
+		if err != nil {
+			t.Fatalf("SearchLexical: %v", err)
+		}
+		if len(got) < 3 {
+			t.Fatalf("got %v, want every episode sharing any term", contents(got))
+		}
+	})
+
+	t.Run("more overlap still ranks higher", func(t *testing.T) {
+		// This is why dropping AND costs nothing: ts_rank_cd already expresses
+		// it. The episode carrying the most of the query comes back first, so
+		// what AND would have selected is what OR puts at the top.
+		got, err := store.SearchLexical(ctx, lexical("user:1", question, later))
+		if err != nil {
+			t.Fatalf("SearchLexical: %v", err)
+		}
+		if got[0].Episode.Content != "I moved to Berlin in June for a new job" {
+			t.Errorf("best match is %q, want the episode sharing the most terms",
+				got[0].Episode.Content)
+		}
+		for i := 1; i < len(got); i++ {
+			if got[i].Score > got[i-1].Score {
+				t.Errorf("candidate %d scores above the one before it", i)
+			}
+		}
+	})
+
+	t.Run("an unrelated episode is still excluded", func(t *testing.T) {
+		// Permissive is not indiscriminate: sharing no lexeme still means no
+		// match, or the channel would return the whole scope every time.
+		got, err := store.SearchLexical(ctx, lexical("user:1", "Berlin winter", later))
+		if err != nil {
+			t.Fatalf("SearchLexical: %v", err)
+		}
+		for _, candidate := range got {
+			if candidate.Episode.Content == "I had pasta for dinner" {
+				t.Errorf("got %v, want the pasta episode excluded", contents(got))
+			}
+		}
+	})
+
+	t.Run("a query of nothing but stop words matches nothing", func(t *testing.T) {
+		got, err := store.SearchLexical(ctx, lexical("user:1", "the and of", later))
+		if err != nil {
+			t.Fatalf("SearchLexical: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("got %v, want no matches from an empty tsquery", contents(got))
+		}
+	})
+}

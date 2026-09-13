@@ -90,10 +90,25 @@ WHERE enc.model = %s AND enc.scope_id = %s AND enc.ingested_at <= %s`,
 
 // SearchLexical returns the best full-text matches, best first.
 //
-// The query is parsed with the text search configuration the schema was migrated
-// with, using websearch_to_tsquery so a user-supplied string can never be a
-// syntax error. A query of nothing but stop words yields an empty tsquery and so
-// no matches, which is an empty result rather than a failure.
+// The query matches an episode sharing any one of its lexemes, and ts_rank_cd
+// then orders by how much is shared. That is deliberately permissive, and it
+// replaced websearch_to_tsquery, which puts AND between terms.
+//
+// AND looks like the careful choice and is the wrong one, because here the
+// operator decides what matches at all rather than merely how it ranks. A
+// conversational question does not have all of its words in one episode: over
+// LongMemEval, 399 of 479 questions -- 83.3% -- matched nothing whatsoever, and
+// no ranking reaches an empty candidate set. Switching to any-lexeme took hit@10
+// from 0.096 to 0.384 and empty results to zero, while nDCG and MRR rose too, so
+// this is not coverage bought with precision. See the eval subpackage.
+//
+// Nothing is lost by dropping AND, because ts_rank_cd already expresses it: an
+// episode carrying every term of the query scores above one carrying a single
+// term, so the AND matches come back at the top of the OR result rather than
+// being the only thing considered.
+//
+// A query of nothing but stop words yields an empty tsquery, which matches
+// nothing -- an empty result rather than a failure.
 func (s *Store) SearchLexical(
 	ctx context.Context,
 	q mempher.LexicalQuery,
@@ -110,9 +125,9 @@ func (s *Store) SearchLexical(
 
 	var sql strings.Builder
 	fmt.Fprintf(&sql, `SELECT %s, ts_rank_cd(e.content_tsv, tsq.query) AS score
-FROM mempher.episodes e, websearch_to_tsquery(%s::regconfig, %s) AS tsq(query)
+FROM mempher.episodes e, (SELECT %s) AS tsq(query)
 WHERE e.scope_id = %s AND e.ingested_at <= %s AND e.content_tsv @@ tsq.query`,
-		episodeColumnsQualified, config, text, scope, asOf)
+		episodeColumnsQualified, anyLexemeQuery(config, text), scope, asOf)
 	b.appendEpisodeFilters(&sql, q.ChannelQuery)
 	// seq descending is a deterministic tie-break within a scope: on equal
 	// rank, the more recent episode wins.
