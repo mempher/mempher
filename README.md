@@ -187,6 +187,51 @@ searchable once a worker encodes it, and has yielded whatever **facts** it holds
 once a worker extracts it. Recall fuses whichever channels answered and reports
 what each contributed, so a thin result is never mistaken for an empty memory.
 
+## Where the models plug in
+
+Two ports, and they cost very different amounts of work.
+
+`Embedder` is twenty lines against any provider SDK. The vector space is the
+provider's problem, not yours.
+
+`Extractor` is the hard one, and
+[`mempher/extract`](https://pkg.go.dev/github.com/mempher/mempher/extract) ships
+a reference implementation so that it is not the first thing you have to get
+right. It owns the prompt, the response schema and the validation that decides
+what a `FactStore` will accept. You supply one method, and no dependency comes
+with it.
+
+```go
+// One structured model call. Everything else -- what to ask, how to read the
+// answer, and what to do when the answer is wrong -- is in the package.
+type Completer interface {
+	Complete(ctx context.Context, p extract.Prompt) ([]byte, error)
+	Model() string
+}
+
+ex, err := extract.New(myCompleter, extract.Options{
+	// The most valuable option here. A triple is identity, so a model that
+	// writes "lives_in" today and "resides_in" tomorrow supersedes nothing,
+	// ever. The vocabulary goes into the schema as an enum.
+	Predicates:   []mempher.Predicate{"lives_in", "allergic_to", "works_at"},
+	Instructions: "A support agent: care about entitlements and past incidents.",
+})
+
+fmt.Println(ex.Model()) // mempher-extract/v1+claude-opus-5+a3f9c1e2
+```
+
+That id is the point of the package. It composes the shipped prompt revision,
+your model, and a digest of the options -- so editing the instructions makes a
+*different* extractor, and its facts are a backfill rather than a silent mixture
+with the old ones. The same contract as changing embedding model.
+
+The honest limit: an extraction can only retract facts it was handed, and how
+many it is handed is `WorkerConfig.KnownFactLimit`. Extraction is a pure function
+of its inputs -- an extractor that went looking in the store could not be
+replayed, and replay is the only repair L1 has. `Options.Reconcile` spends a
+cheap first call to pick the relevant ones out of that set; nothing can enlarge
+it.
+
 ## The invariant, and what enforces it
 
 **Episodes (L0) are immutable and the only source of truth.** A trigger on

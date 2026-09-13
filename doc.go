@@ -36,6 +36,11 @@
 // [Worker] drains it, and [Recollection.Facts] carries the result. Leave it nil
 // and none of that happens.
 //
+// Writing an [Extractor] is the one part of this that is a prompt rather than a
+// schema, so the extract subpackage ships one: it owns the prompt, the response
+// schema and the validation that decides what a [FactStore] will accept, and
+// asks a caller for a single structured model call.
+//
 // The two layers are not peers, and recall keeps them apart. Episodes are ranked
 // against the query and fused; facts are what is true about the scope, returned
 // whole and budgeted first.

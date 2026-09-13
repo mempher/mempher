@@ -10,6 +10,12 @@ import (
 // Length limits on the parts of a fact, enforced here and again by CHECK
 // constraints.
 const (
+	// MaxExtractorLen is the longest permitted [ExtractorID], in bytes.
+	//
+	// Like every other part of a fact's temporal primary key it is sized to
+	// fit inside one GiST index tuple. An id that composes a model name with a
+	// prompt revision therefore has room, but not unlimited room.
+	MaxExtractorLen = 200
 	// MaxSubjectLen is the longest permitted [Subject], in bytes.
 	MaxSubjectLen = 200
 	// MaxPredicateLen is the longest permitted [Predicate], in bytes.

@@ -9,7 +9,9 @@ import (
 	"log/slog"
 	"os"
 	"slices"
+	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Worker defaults, used when the corresponding [WorkerConfig] field is zero.
@@ -26,6 +28,8 @@ const (
 	DefaultRetryBackoff = 10 * time.Second
 	// MaxRetryBackoff caps the wait between attempts.
 	MaxRetryBackoff = 10 * time.Minute
+	// maxKnownFactCue caps the text the known facts are ranked against.
+	maxKnownFactCue = 8 << 10
 	// DefaultKnownFactLimit is how many of a scope's facts an [Extractor] is
 	// shown as context when a [WorkerConfig] does not say.
 	DefaultKnownFactLimit = 100
@@ -402,11 +406,18 @@ func (w *Worker) extract(ctx context.Context, job Job) error {
 	// they describe. Both cuts come from the episode rather than the clock,
 	// which is what lets a backfill reproduce the extraction it replaces
 	// instead of re-deciding it against today.
+	//
+	// Text is what decides which facts survive the limit, and it matters most
+	// on exactly the scopes where L1 is worth having. Without it the store
+	// orders by subject and predicate, so a scope holding more than
+	// KnownFactLimit facts shows an extractor the alphabetically first ones --
+	// and a claim an extractor is not shown is a claim it cannot supersede.
 	known, err := w.facts.Facts(ctx, FactQuery{
 		Scope:     job.Scope,
 		Extractor: w.extractor.Model(),
 		AsOf:      latest.IngestedAt,
 		At:        latest.OccurredAt,
+		Text:      knownFactCue(episodes),
 		Limit:     w.known,
 	})
 	if err != nil {
@@ -464,4 +475,32 @@ func retryBackoff(attempt int) time.Duration {
 		}
 	}
 	return backoff
+}
+
+// knownFactCue is the text the known facts are ranked against: what these
+// episodes are about.
+//
+// It is a retrieval cue rather than a prompt, so it is capped. Full-text ranking
+// gains nothing from the tail of a megabyte-long episode, and the cut is moved
+// back to a rune boundary because the database will reject text that is not
+// valid UTF-8.
+func knownFactCue(episodes []Episode) string {
+	var b strings.Builder
+	for _, ep := range episodes {
+		if b.Len() >= maxKnownFactCue {
+			break
+		}
+		if b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteString(ep.Content)
+	}
+	cue := b.String()
+	if len(cue) > maxKnownFactCue {
+		cue = cue[:maxKnownFactCue]
+		for len(cue) > 0 && !utf8.ValidString(cue) {
+			cue = cue[:len(cue)-1]
+		}
+	}
+	return cue
 }
