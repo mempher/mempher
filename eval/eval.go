@@ -59,14 +59,14 @@ type Config struct {
 	// the semantic and fact channels have something to answer with. Nil leaves
 	// projections unbuilt, which is a lexical-only run.
 	Worker *mempher.Worker
-	// Channels selects the channel sets to measure, each scored separately.
-	// Empty means one set: whatever the Memory would run by default.
+	// Variants are the configurations to score, each summarised separately.
+	// Empty means one: whatever [Config.Memory] does by default.
 	//
-	// It is a list of sets rather than one set because a haystack is ingested
-	// once for all of them. Encoding a corpus is the expensive half of a run by
-	// a wide margin, and running three times to compare three channel sets
-	// would embed the same quarter of a million episodes three times over.
-	Channels [][]mempher.Channel
+	// They share one ingestion, which is the point. Encoding a corpus is the
+	// expensive half of a run by a wide margin -- an hour of CPU for
+	// LongMemEval -- so comparing five configurations by running five times
+	// would embed the same quarter of a million episodes five times over.
+	Variants []Variant
 	// Limit is how many episodes recall returns, and the k in every metric.
 	// Zero means [DefaultLimit].
 	Limit int
@@ -84,6 +84,22 @@ type Config struct {
 	// full run takes minutes and a silent one is indistinguishable from a
 	// hung one.
 	Progress func(done int, last Result)
+}
+
+// Variant is one configuration to score.
+//
+// It carries a [mempher.Memory] of its own so that two variants can differ by
+// something other than channels -- fusion weights, a token budget, a default
+// limit. A nil Memory uses [Config.Memory]. They must share a [mempher.Store],
+// or the second variant will search a scope the first never wrote to.
+type Variant struct {
+	// Name identifies the variant in its [Summary].
+	Name string
+	// Channels selects which channels to run. Empty means the Memory's own
+	// default.
+	Channels []mempher.Channel
+	// Memory overrides [Config.Memory] for this variant alone.
+	Memory *mempher.Memory
 }
 
 // DefaultLimit is the k used when [Config.Limit] is zero. It matches
@@ -137,16 +153,22 @@ func Run(ctx context.Context, cfg Config, ds Dataset) ([]Summary, error) {
 	if limit == 0 {
 		limit = DefaultLimit
 	}
-	sets := cfg.Channels
-	if len(sets) == 0 {
-		sets = [][]mempher.Channel{nil}
+	variants := cfg.Variants
+	if len(variants) == 0 {
+		variants = []Variant{{Name: "default"}}
+	}
+	for i := range variants {
+		if variants[i].Memory == nil {
+			variants[i].Memory = cfg.Memory
+		}
 	}
 
-	summaries := make([]Summary, len(sets))
-	for i, set := range sets {
+	summaries := make([]Summary, len(variants))
+	for i, variant := range variants {
 		summaries[i] = Summary{
 			Dataset:  ds.Name,
-			Channels: set,
+			Variant:  variant.Name,
+			Channels: variant.Channels,
 			Limit:    limit,
 			ByType:   map[string]*TypeSummary{},
 		}
@@ -162,7 +184,7 @@ func Run(ctx context.Context, cfg Config, ds Dataset) ([]Summary, error) {
 			}
 			continue
 		}
-		results, err := run(ctx, cfg, question, limit, sets)
+		results, err := run(ctx, cfg, question, limit, variants)
 		if err != nil {
 			return nil, err
 		}
@@ -184,7 +206,7 @@ func run(
 	cfg Config,
 	q Question,
 	limit int,
-	sets [][]mempher.Channel,
+	variants []Variant,
 ) ([]Result, error) {
 	scope := mempher.ScopeID("eval:" + q.ID)
 
@@ -199,21 +221,21 @@ func run(
 	}
 	ingested := time.Since(started)
 
-	results := make([]Result, len(sets))
-	for i, set := range sets {
+	results := make([]Result, len(variants))
+	for i, variant := range variants {
 		request := mempher.RecallRequest{
 			Scope:    scope,
 			Query:    q.Query,
-			Channels: set,
+			Channels: variant.Channels,
 			Limit:    limit,
 		}
 		if cfg.BoundByQuestionTime {
 			request.OccurredTo = q.Asked
 		}
 		recalledAt := time.Now()
-		recollection, err := cfg.Memory.Recall(ctx, request)
+		recollection, err := variant.Memory.Recall(ctx, request)
 		if err != nil {
-			return nil, fmt.Errorf("eval: %s: recall %v: %w", q.ID, set, err)
+			return nil, fmt.Errorf("eval: %s: recall %s: %w", q.ID, variant.Name, err)
 		}
 		results[i] = score(q, recollection, limit)
 		results[i].Channels = recollection.Channels

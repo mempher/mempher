@@ -351,6 +351,46 @@ Your own embedder adds its latency to `Recall` and *nothing at all* to either
 append — that is the reason the write path makes no model call. Reproduce with
 `make bench`.
 
+## How good
+
+Speed is worth nothing if the right episode is not in the result. Against
+[LongMemEval](https://github.com/xiaowu0162/LongMemEval) — 500 questions, each
+with its own haystack of about 50 sessions and 490 turns, 246,930 episodes in
+all, and a median of **2** turns per question that actually carry the answer:
+
+| k=10, 479 questions scored | hit@10 | recall@10 | nDCG@10 | MRR |
+| --- | --- | --- | --- | --- |
+| lexical alone | 0.384 | 0.313 | 0.166 | 0.123 |
+| semantic alone | 0.850 | 0.727 | **0.513** | **0.495** |
+| **both, fused — the default** | **0.871** | **0.743** | 0.482 | 0.425 |
+
+Fused, by question type:
+
+| | hit@10 | | | hit@10 |
+| --- | --- | --- | --- | --- |
+| single-session-assistant | 1.000 | | multi-session | 0.872 |
+| knowledge-update | 0.972 | | temporal-reasoning | 0.773 |
+| single-session-user | 0.922 | | single-session-preference | 0.700 |
+
+The embedder is `all-MiniLM-L6-v2` — 384 dimensions, small, old, and free —
+running locally. A current model should do better; this is a floor, not a
+ceiling. Recall latency across both channels was 23 ms at p50, of which the
+query embedding is most of it.
+
+**What this measures, and what it does not.** Retrieval, not question answering.
+The benchmark marks the individual turns that hold an answer, and an episode
+here is a turn, so the labels line up exactly — no LLM judge, no API key, no
+budget, and a number that means the same thing next year. It is deliberately
+*not* comparable to the end-to-end accuracy figures usually quoted for
+LongMemEval, which mostly measure the generator reading the context. This
+measures whether the evidence was in the context at all, which is the part a
+memory layer is responsible for.
+
+Reproduce with `make eval LONGMEMEVAL=/path/to/longmemeval_s`, and see
+[`mempher/eval`](https://pkg.go.dev/github.com/mempher/mempher/eval) for the
+harness. It ingests each haystack once and scores every channel configuration
+against it, so comparing three is not three times the work.
+
 ## Requirements
 
 - Go 1.27

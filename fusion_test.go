@@ -173,6 +173,14 @@ func TestFuse(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
+			// Pin the lexical weight unless the case is about weighting. These
+			// cases test the arithmetic of fusion, and inheriting
+			// DefaultLexicalWeight would make them test the calibration
+			// instead -- so a change to that number would fail them for the
+			// wrong reason, and a change to the arithmetic could hide inside it.
+			if tc.opts.Weights == nil {
+				tc.opts.Weights = map[Channel]float64{ChannelLexical: 1}
+			}
 			opts, err := tc.opts.resolve()
 			if err != nil {
 				t.Fatalf("resolve options: %v", err)
@@ -205,7 +213,7 @@ func TestFuse(t *testing.T) {
 func TestFuseHitsAreSorted(t *testing.T) {
 	t.Parallel()
 
-	opts, err := FusionOptions{}.resolve()
+	opts, err := FusionOptions{Weights: map[Channel]float64{ChannelLexical: 1}}.resolve()
 	if err != nil {
 		t.Fatalf("resolve options: %v", err)
 	}
@@ -298,4 +306,75 @@ func TestFusionOptionsResolveDetachesWeights(t *testing.T) {
 	if got := resolved.weight(ChannelSemantic); got != 1 {
 		t.Errorf("unweighted channel = %v, want 1", got)
 	}
+}
+
+// TestDefaultLexicalWeightIsApplied pins the calibration itself, which the
+// tests above deliberately opt out of.
+//
+// It is a policy rather than arithmetic, and it exists because measurement said
+// so: at equal weight, fusing the two channels scored below the semantic
+// channel used alone. If this value ever changes it should change because a
+// later run of the eval subpackage said to, and this is the test that makes
+// that a deliberate act.
+func TestDefaultLexicalWeightIsApplied(t *testing.T) {
+	t.Parallel()
+
+	resolved, err := FusionOptions{}.resolve()
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if got := resolved.weight(ChannelLexical); got != DefaultLexicalWeight {
+		t.Errorf("lexical weight = %v, want %v", got, DefaultLexicalWeight)
+	}
+	// Only the lexical channel is calibrated; everything else is still 1.
+	if got := resolved.weight(ChannelSemantic); got != 1 {
+		t.Errorf("semantic weight = %v, want 1", got)
+	}
+
+	t.Run("naming it overrides the default", func(t *testing.T) {
+		for _, want := range []float64{0, 1, 3} {
+			resolved, err := FusionOptions{
+				Weights: map[Channel]float64{ChannelLexical: want},
+			}.resolve()
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+			if got := resolved.weight(ChannelLexical); got != want {
+				t.Errorf("lexical weight = %v, want the %v that was asked for", got, want)
+			}
+		}
+	})
+
+	t.Run("a quarter of a vote is still a vote", func(t *testing.T) {
+		// Worth stating precisely, because the arithmetic is not intuitive at
+		// K=60: ranks 1 and 2 differ by 1/61 against 1/62, under two percent,
+		// while a quarter-weighted lexical rank-1 adds 0.25/61. So even at this
+		// weight, agreement across channels still outranks a bare rank-1 -- the
+		// calibration reduces how much noise can reorder a good ranking, it
+		// does not stop fusion from fusing.
+		opts, err := FusionOptions{}.resolve()
+		if err != nil {
+			t.Fatalf("resolve: %v", err)
+		}
+		fused := fuse([]channelResult{
+			{channel: ChannelSemantic, candidates: []Candidate{
+				{Episode: ep(1), Channel: ChannelSemantic, Rank: 1},
+				{Episode: ep(2), Channel: ChannelSemantic, Rank: 2},
+			}},
+			{channel: ChannelLexical, candidates: []Candidate{
+				{Episode: ep(2), Channel: ChannelLexical, Rank: 1},
+			}},
+		}, opts)
+
+		if len(fused) != 2 {
+			t.Fatalf("got %d episodes, want 2", len(fused))
+		}
+		want := 1/(DefaultFusionK+2) + DefaultLexicalWeight/(DefaultFusionK+1)
+		if math.Abs(fused[0].Score-want) > 1e-12 {
+			t.Errorf("confirmed episode scored %v, want %v", fused[0].Score, want)
+		}
+		if got := ids(fused); got[0] != 2 {
+			t.Errorf("fused order = %v, want the episode both channels found first", got)
+		}
+	})
 }

@@ -1,10 +1,10 @@
 package eval_test
 
 import (
+	"fmt"
 	"os"
 	"slices"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -29,9 +29,9 @@ const dims = 128
 //
 //	LONGMEMEVAL=/path/to/longmemeval_s go test ./eval/ -run LongMemEval -v -timeout 30m
 //
-// Scopes are deliberately not erased between questions. By the end the episode
-// table holds every haystack at once, so the recall latency reported is latency
-// against a quarter of a million episodes rather than against one conversation.
+// Each scope is erased once it has been scored, which keeps the run tractable;
+// LONGMEMEVAL_KEEP=1 accumulates instead, so that latency is measured against
+// the whole corpus rather than one conversation.
 func TestLongMemEval(t *testing.T) {
 	path := os.Getenv("LONGMEMEVAL")
 	if path == "" {
@@ -57,9 +57,9 @@ func TestLongMemEval(t *testing.T) {
 	// A worker only when the semantic channel is being measured: encoding a
 	// quarter of a million episodes is the expensive half of the run, and a
 	// lexical measurement does not read a single vector.
-	sets := channelSetsFromEnv(embedder)
+	variants := variantsFor(t, store, embedder, memory)
 	var worker *mempher.Worker
-	if usesSemantic(sets) {
+	if usesSemantic(variants) {
 		worker, err = mempher.NewWorker(mempher.WorkerConfig{
 			Store: store, Embedder: embedder, ID: "eval",
 		})
@@ -68,10 +68,27 @@ func TestLongMemEval(t *testing.T) {
 		}
 	}
 
+	// Erasing each scope once it is scored keeps the run tractable, and the
+	// cost is only to the latency figures.
+	//
+	// HNSW insert cost grows with index size, so a run that accumulates every
+	// haystack is paying more to ingest question 400 than question 4: measured,
+	// it went from eight seconds a question to nearly fifty. Erasing holds the
+	// index at one scope. It cannot affect a quality metric -- a recall never
+	// crosses a scope, so a question can only ever have searched its own
+	// haystack either way -- but it does mean latency is measured against one
+	// conversation rather than against the whole corpus. LONGMEMEVAL_KEEP=1
+	// accumulates instead, which is how to measure latency at full size.
+	var forgetful mempher.Store = store
+	if os.Getenv("LONGMEMEVAL_KEEP") != "" {
+		forgetful = nil
+	}
+
 	cfg := eval.Config{
 		Memory:   memory,
+		Store:    forgetful,
 		Worker:   worker,
-		Channels: sets,
+		Variants: variants,
 		Limit:    intFromEnv("LONGMEMEVAL_K", eval.DefaultLimit),
 		Progress: func(done int, last eval.Result) {
 			if done%25 == 0 {
@@ -100,21 +117,39 @@ func TestLongMemEval(t *testing.T) {
 	// haystack never landed, which otherwise looks like a bad score.
 	for _, summary := range summaries {
 		if summary.HitRate == 0 {
-			t.Errorf("every question missed on %v, so the harness is broken, not the ranking",
-				summary.Channels)
+			t.Errorf("every question missed on %s, so the harness is broken, not the ranking",
+				summary.Variant)
 		}
 	}
 }
 
-// usesSemantic reports whether any set needs episodes to have been encoded,
+// usesSemantic reports whether any variant needs episodes to have been encoded,
 // which is what decides if the run pays for a worker.
-func usesSemantic(sets [][]mempher.Channel) bool {
-	for _, set := range sets {
-		if slices.Contains(set, mempher.ChannelSemantic) {
+func usesSemantic(variants []eval.Variant) bool {
+	for _, variant := range variants {
+		if slices.Contains(variant.Channels, mempher.ChannelSemantic) {
 			return true
 		}
 	}
 	return false
+}
+
+// weighted returns a Memory identical to the one under test except for how
+// fusion scores the lexical channel, so that a run can compare fusion settings
+// without ingesting the corpus once per setting.
+func weighted(t *testing.T, store mempher.Store, embedder mempher.Embedder, lexical float64) *mempher.Memory {
+	t.Helper()
+	memory, err := mempher.New(mempher.Config{
+		Store:    store,
+		Embedder: embedder,
+		Fusion: mempher.FusionOptions{
+			Weights: map[mempher.Channel]float64{mempher.ChannelLexical: lexical},
+		},
+	})
+	if err != nil {
+		t.Fatalf("mempher.New weighted %v: %v", lexical, err)
+	}
+	return memory
 }
 
 // capped shortens a dataset, for a smoke run over a handful of questions.
@@ -163,36 +198,46 @@ func embedderFromEnv(t *testing.T) mempher.Embedder {
 	return embedder
 }
 
-// channelSetsFromEnv selects what to measure.
+// variantsFor is what the run compares.
 //
-// With a real embedder the default is all three sets -- each channel alone and
-// then fused -- because that is the comparison worth having and the haystack is
-// ingested once for all of them. Without one it is lexical alone, since nothing
-// else can answer.
-//
-// LONGMEMEVAL_CHANNELS overrides it: sets separated by spaces, channels within a
-// set by commas, as in "lexical semantic semantic,lexical".
-func channelSetsFromEnv(embedder mempher.Embedder) [][]mempher.Channel {
-	raw := os.Getenv("LONGMEMEVAL_CHANNELS")
-	if raw == "" {
-		if _, stand := embedder.(*memphertest.Embedder); stand {
-			return [][]mempher.Channel{{mempher.ChannelLexical}}
-		}
-		return [][]mempher.Channel{
-			{mempher.ChannelLexical},
-			{mempher.ChannelSemantic},
-			{mempher.ChannelSemantic, mempher.ChannelLexical},
-		}
+// With a real embedder that is each channel alone and then fusion at several
+// lexical weights, because the equal-weight default turned out to score below
+// the semantic channel on its own and the question is whether weighting
+// recovers it. Without an embedder it is lexical alone, since nothing else can
+// answer. All of them share one ingestion.
+func variantsFor(
+	t *testing.T,
+	store mempher.Store,
+	embedder mempher.Embedder,
+	memory *mempher.Memory,
+) []eval.Variant {
+	t.Helper()
+	lexicalOnly := eval.Variant{
+		Name:     "lexical",
+		Channels: []mempher.Channel{mempher.ChannelLexical},
+		Memory:   memory,
 	}
-	var sets [][]mempher.Channel
-	for _, group := range strings.Fields(raw) {
-		var set []mempher.Channel
-		for _, name := range strings.Split(group, ",") {
-			set = append(set, mempher.Channel(strings.TrimSpace(name)))
-		}
-		sets = append(sets, set)
+	if _, stand := embedder.(*memphertest.Embedder); stand {
+		return []eval.Variant{lexicalOnly}
 	}
-	return sets
+
+	both := []mempher.Channel{mempher.ChannelSemantic, mempher.ChannelLexical}
+	variants := []eval.Variant{
+		lexicalOnly,
+		{
+			Name:     "semantic",
+			Channels: []mempher.Channel{mempher.ChannelSemantic},
+			Memory:   memory,
+		},
+	}
+	for _, weight := range []float64{1, 0.5, 0.25, 0.1} {
+		variants = append(variants, eval.Variant{
+			Name:     fmt.Sprintf("fused, lexical weight %.2g", weight),
+			Channels: both,
+			Memory:   weighted(t, store, embedder, weight),
+		})
+	}
+	return variants
 }
 
 func intFromEnv(key string, fallback int) int {
