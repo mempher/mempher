@@ -106,6 +106,18 @@ type Options struct {
 	// It is emitted into the schema as an enum, so the provider's own
 	// constraint does the work and the check here is only a backstop. Order and
 	// repetition do not matter: it is treated as a set.
+	//
+	// Measured, on the same model and the same prompt, reading "I just bought a
+	// Tesla Model 3 last week, replacing my old Honda Civic":
+	//
+	//	no vocabulary  lives_in      "The user lived in a Honda Civic"
+	//	a vocabulary   owns_vehicle  "The user owns a Tesla Model 3"
+	//
+	// The constraint did not merely tidy the slug. Forced to choose among
+	// relations that exist, the model found the right one; left to invent, it
+	// reached for a familiar relation and wrote a false statement around it.
+	// That is worth more than consistency, and consistency was already the
+	// argument for it.
 	Predicates []mempher.Predicate
 
 	// Instructions is a domain addendum appended to the shipped prompt: what
