@@ -1,10 +1,12 @@
 package eval_test
 
 import (
+	"cmp"
 	"fmt"
 	"os"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -105,6 +107,7 @@ func TestLongMemEval(t *testing.T) {
 	}
 
 	t.Logf("embedder %s, wall clock %s", embedder.Model(), time.Since(started).Round(time.Second))
+	t.Logf("\n%s", compare(summaries))
 	for _, summary := range summaries {
 		t.Logf("\n%s", summary)
 	}
@@ -134,20 +137,21 @@ func usesSemantic(variants []eval.Variant) bool {
 	return false
 }
 
-// weighted returns a Memory identical to the one under test except for how
-// fusion scores the lexical channel, so that a run can compare fusion settings
-// without ingesting the corpus once per setting.
-func weighted(t *testing.T, store mempher.Store, embedder mempher.Embedder, lexical float64) *mempher.Memory {
+// tuned returns a Memory identical to the one under test except for its fusion
+// settings, so that a run can sweep them without ingesting the corpus once per
+// setting. A Recall costs milliseconds; the ingestion behind it costs an hour.
+func tuned(t *testing.T, store mempher.Store, embedder mempher.Embedder, k, lexical float64) *mempher.Memory {
 	t.Helper()
 	memory, err := mempher.New(mempher.Config{
 		Store:    store,
 		Embedder: embedder,
 		Fusion: mempher.FusionOptions{
+			K:       k,
 			Weights: map[mempher.Channel]float64{mempher.ChannelLexical: lexical},
 		},
 	})
 	if err != nil {
-		t.Fatalf("mempher.New weighted %v: %v", lexical, err)
+		t.Fatalf("mempher.New K=%v lexical=%v: %v", k, lexical, err)
 	}
 	return memory
 }
@@ -200,11 +204,15 @@ func embedderFromEnv(t *testing.T) mempher.Embedder {
 
 // variantsFor is what the run compares.
 //
-// With a real embedder that is each channel alone and then fusion at several
-// lexical weights, because the equal-weight default turned out to score below
-// the semantic channel on its own and the question is whether weighting
-// recovers it. Without an embedder it is lexical alone, since nothing else can
-// answer. All of them share one ingestion.
+// With a real embedder it is each channel alone, then a grid over the two
+// fusion settings. They interact: K decides how much a rank is worth against a
+// second opinion, and the weight decides how much that second opinion counts, so
+// sweeping either alone would attribute the result to the wrong one. The grid
+// is nearly free -- every cell is one more Recall against a haystack that has
+// already been ingested and encoded.
+//
+// Single-channel variants are K-invariant, because with one channel the fused
+// order is monotonic in rank whatever K is. So there is one of each.
 func variantsFor(
 	t *testing.T,
 	store mempher.Store,
@@ -213,7 +221,7 @@ func variantsFor(
 ) []eval.Variant {
 	t.Helper()
 	lexicalOnly := eval.Variant{
-		Name:     "lexical",
+		Name:     "lexical alone",
 		Channels: []mempher.Channel{mempher.ChannelLexical},
 		Memory:   memory,
 	}
@@ -225,19 +233,38 @@ func variantsFor(
 	variants := []eval.Variant{
 		lexicalOnly,
 		{
-			Name:     "semantic",
+			Name:     "semantic alone",
 			Channels: []mempher.Channel{mempher.ChannelSemantic},
 			Memory:   memory,
 		},
 	}
-	for _, weight := range []float64{1, 0.5, 0.25, 0.1} {
-		variants = append(variants, eval.Variant{
-			Name:     fmt.Sprintf("fused, lexical weight %.2g", weight),
-			Channels: both,
-			Memory:   weighted(t, store, embedder, weight),
-		})
+	for _, k := range []float64{1, 5, 20, 60} {
+		for _, weight := range []float64{0.1, 0.25, 0.5, 1} {
+			variants = append(variants, eval.Variant{
+				Name:     fmt.Sprintf("fused K=%-2g lexical=%.2g", k, weight),
+				Channels: both,
+				Memory:   tuned(t, store, embedder, k, weight),
+			})
+		}
 	}
 	return variants
+}
+
+// compare renders one line per variant, because eighteen full tables is a
+// listing and what a sweep needs is a ranking.
+func compare(summaries []eval.Summary) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%-26s %8s %10s %8s %8s\n", "variant", "hit@k", "recall@k", "nDCG@k", "MRR")
+	fmt.Fprintf(&b, "%s\n", strings.Repeat("-", 64))
+	best := slices.Clone(summaries)
+	slices.SortStableFunc(best, func(x, y eval.Summary) int {
+		return cmp.Compare(y.HitRate, x.HitRate)
+	})
+	for _, s := range best {
+		fmt.Fprintf(&b, "%-26s %8.3f %10.3f %8.3f %8.3f\n",
+			s.Variant, s.HitRate, s.Recall, s.NDCG, s.MRR)
+	}
+	return b.String()
 }
 
 func intFromEnv(key string, fallback int) int {

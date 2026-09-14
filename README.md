@@ -377,6 +377,11 @@ running locally. A current model should do better; this is a floor, not a
 ceiling. Recall latency across both channels was 23 ms at p50, of which the
 query embedding is most of it.
 
+Both fusion settings are calibrated on this benchmark rather than assumed: a
+grid over the smoothing constant and the lexical weight put the defaults where
+they are, and the same run says the weight is what matters and the constant is
+close to irrelevant. See `DefaultLexicalWeight` and `DefaultFusionK`.
+
 **What this measures, and what it does not.** Retrieval, not question answering.
 The benchmark marks the individual turns that hold an answer, and an episode
 here is a turn, so the labels line up exactly — no LLM judge, no API key, no
