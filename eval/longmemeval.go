@@ -74,6 +74,7 @@ type lmeInstance struct {
 	QuestionID         string      `json:"question_id"`
 	QuestionType       string      `json:"question_type"`
 	Question           string      `json:"question"`
+	Answer             loose       `json:"answer"`
 	QuestionDate       string      `json:"question_date"`
 	HaystackDates      []string    `json:"haystack_dates"`
 	HaystackSessionIDs []string    `json:"haystack_session_ids"`
@@ -94,10 +95,11 @@ func (in lmeInstance) question() (Question, error) {
 	}
 
 	q := Question{
-		ID:    in.QuestionID,
-		Type:  in.QuestionType,
-		Query: in.Question,
-		Asked: asked,
+		ID:     in.QuestionID,
+		Type:   in.QuestionType,
+		Query:  in.Question,
+		Answer: string(in.Answer),
+		Asked:  asked,
 	}
 	for i, session := range in.HaystackSessions {
 		if i >= len(in.HaystackDates) {
@@ -148,4 +150,20 @@ func lmeRole(role string) (mempher.Role, error) {
 	default:
 		return "", fmt.Errorf("unknown role %q: %w", role, mempher.ErrInvalidRole)
 	}
+}
+
+// loose is a benchmark field that is usually a string and occasionally a bare
+// number -- an answer of "2" is written 2. Decoding it as a string fails on
+// those, and failing the whole run over a type the file is casual about would be
+// the wrong kind of strict.
+type loose string
+
+func (l *loose) UnmarshalJSON(data []byte) error {
+	var text string
+	if err := json.Unmarshal(data, &text); err == nil {
+		*l = loose(text)
+		return nil
+	}
+	*l = loose(strings.Trim(string(data), `"`))
+	return nil
 }

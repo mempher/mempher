@@ -22,6 +22,10 @@ type Question struct {
 	Type string
 	// Query is what to recall with.
 	Query string
+	// Answer is what the benchmark expects, when it says. Used by [RunL1],
+	// which has no ranking to score and must fall back on whether the claim
+	// came out at all.
+	Answer string
 	// Asked is when the question was put. It is recorded rather than applied:
 	// see [Config.BoundByQuestionTime].
 	Asked time.Time

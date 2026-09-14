@@ -564,3 +564,62 @@ func TestPromptRevisionIsPinnedToTheTextItShips(t *testing.T) {
 			"but PromptVersion is still %d", got, pinnedDigest, PromptVersion)
 	}
 }
+
+func TestAValidReplyOfTheWrongShapeIsNotAnEmptyExtraction(t *testing.T) {
+	// Found against a real model: asked to extract, a small one replied with a
+	// bare assertion object rather than the envelope around it. That is valid
+	// JSON, it decodes without error, and every field lands nowhere -- so it
+	// used to arrive as "this conversation held nothing durable", which is the
+	// most common correct answer and therefore the worst possible disguise.
+	//
+	// A worker retrying a malformed reply is right. A worker recording an empty
+	// extraction and marking the episodes read is wrong, and unrecoverable
+	// without a backfill, because the marker says the work is done.
+	cases := map[string]string{
+		"a bare assertion": `{
+			"subject": "the user", "predicate": "lives_in", "object": "Berlin",
+			"statement": "the user lives in Berlin",
+			"valid_from": "2024-06-01", "confidence": 0.9
+		}`,
+		"a differently named envelope": `{"facts": [], "retracted": []}`,
+		"an empty object":              `{}`,
+	}
+	for name, reply := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := newExtractor(t, newFake(reply), Options{})
+			_, err := e.Extract(t.Context(), request())
+			if !errors.Is(err, ErrMalformedResponse) {
+				t.Fatalf("Extract: got %v, want ErrMalformedResponse", err)
+			}
+		})
+	}
+
+	t.Run("an empty but well-shaped reply is still a good answer", func(t *testing.T) {
+		// The distinction only earns its place if this still works: most
+		// episodes carry no durable fact, and saying so must stay cheap.
+		for _, reply := range []string{
+			`{"assertions": [], "retractions": []}`,
+			`{"assertions": []}`,
+			`{"assertions": null, "retractions": []}`,
+		} {
+			e := newExtractor(t, newFake(reply), Options{})
+			res, err := e.Extract(t.Context(), request())
+			if err != nil {
+				t.Fatalf("Extract(%s): %v", reply, err)
+			}
+			if len(res.Assert) != 0 || len(res.Retract) != 0 {
+				t.Errorf("Extract(%s) found something in nothing", reply)
+			}
+		}
+	})
+}
+
+func TestReconcileRejectsAWrongShapedTopicsReply(t *testing.T) {
+	c := newFake(`{"topics": ["the user"]}`, `{"assertions": [], "retractions": []}`)
+	e := newExtractor(t, c, Options{Reconcile: true})
+
+	_, err := e.Extract(t.Context(), request(parisFact()))
+	if !errors.Is(err, ErrMalformedResponse) {
+		t.Fatalf("Extract: got %v, want ErrMalformedResponse", err)
+	}
+}

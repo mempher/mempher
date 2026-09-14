@@ -327,6 +327,14 @@ func (e *Extractor) extract(
 	if err != nil {
 		return mempher.ExtractResult{}, err
 	}
+	if !body.answered() {
+		// Valid JSON of the wrong shape. Reported rather than read as an empty
+		// extraction, because a worker retrying a malformed reply is right and
+		// a worker recording "this conversation held nothing" is wrong.
+		return mempher.ExtractResult{}, fmt.Errorf(
+			"mempher/extract: the reply holds neither assertions nor retractions: %w",
+			ErrMalformedResponse)
+	}
 	// Retractions are checked against everything the worker supplied rather
 	// than the narrowed set: a fact id the model returns is either real or
 	// invented, and which facts it was shown does not change that.
@@ -360,12 +368,25 @@ func (e *Extractor) narrow(
 	if err != nil {
 		return nil, err
 	}
-	if len(body.Subjects) == 0 && len(body.Predicates) == 0 {
+	if !body.answered() {
+		return nil, fmt.Errorf(
+			"mempher/extract: the topics reply holds neither subjects nor predicates: %w",
+			ErrMalformedResponse)
+	}
+
+	var named, related []string
+	if body.Subjects != nil {
+		named = *body.Subjects
+	}
+	if body.Predicates != nil {
+		related = *body.Predicates
+	}
+	if len(named) == 0 && len(related) == 0 {
 		return req.Known, nil
 	}
 
-	subjects := lowerSet(body.Subjects)
-	predicates := lowerSet(body.Predicates)
+	subjects := lowerSet(named)
+	predicates := lowerSet(related)
 	kept := make([]mempher.Fact, 0, len(req.Known))
 	for _, f := range req.Known {
 		_, bySubject := subjects[strings.ToLower(string(f.Subject))]

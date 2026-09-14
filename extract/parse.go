@@ -14,16 +14,30 @@ import (
 
 // extraction is a reply to the extraction call, in the shape the schema asks
 // for.
+//
+// The slices are pointers so that an extraction which found nothing can be told
+// from one that did not answer in this shape at all. Both decode into the same
+// zero value otherwise: a model that replies with a bare assertion object rather
+// than the envelope around it produces valid JSON with no matching fields, and
+// "nothing to record" is the single most common correct answer here -- so
+// without this, a model that has misunderstood the schema is indistinguishable
+// from one doing its job, on every call, silently.
 type extraction struct {
-	Assertions  []jsonAssertion  `json:"assertions"`
-	Retractions []jsonRetraction `json:"retractions"`
+	Assertions  *[]jsonAssertion  `json:"assertions"`
+	Retractions *[]jsonRetraction `json:"retractions"`
 }
+
+// answered reports that the reply was in the shape asked for, whether or not it
+// held anything.
+func (e extraction) answered() bool { return e.Assertions != nil || e.Retractions != nil }
 
 // topics is a reply to the first pass of [Options.Reconcile].
 type topics struct {
-	Subjects   []string `json:"subjects"`
-	Predicates []string `json:"predicates"`
+	Subjects   *[]string `json:"subjects"`
+	Predicates *[]string `json:"predicates"`
 }
+
+func (t topics) answered() bool { return t.Subjects != nil || t.Predicates != nil }
 
 type jsonAssertion struct {
 	Subject   string `json:"subject"`
@@ -67,9 +81,17 @@ func (e *Extractor) validate(
 	body extraction,
 	req mempher.ExtractRequest,
 ) mempher.ExtractResult {
+	var assertions []jsonAssertion
+	if body.Assertions != nil {
+		assertions = *body.Assertions
+	}
+	var retractions []jsonRetraction
+	if body.Retractions != nil {
+		retractions = *body.Retractions
+	}
 	return mempher.ExtractResult{
-		Assert:  e.assertions(ctx, body.Assertions, req.Now),
-		Retract: e.retractions(ctx, body.Retractions, req),
+		Assert:  e.assertions(ctx, assertions, req.Now),
+		Retract: e.retractions(ctx, retractions, req),
 	}
 }
 
